@@ -108,7 +108,8 @@
   top: 50%;
   transform: translate(-50%, -50%);
   z-index: 2147483000;
-  width: min(460px, calc(100vw - 32px));
+  /* Wide enough for two alarm columns; collapses to one on a narrow window. */
+  width: min(620px, calc(100vw - 32px));
   /* Tall enough for the whole form on an ordinary screen; the body scrolls. */
   max-height: min(92vh, 880px);
   display: flex;
@@ -214,8 +215,35 @@
  */
 .body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 
-/* The alarm list is a plain block inside that one scroller, not a second one. */
-.listWrap { padding: 8px 12px; border-top: 1px solid var(--border); }
+/*
+ * The alarm board: two columns, each its own scroll window. They are bounded
+ * so that a long history cannot stretch the panel and push the form out of
+ * reach - the two groups are what a person manages against each other.
+ */
+.alarmPanel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+/* One column when the panel cannot give two a usable width. */
+@media (max-width: 700px) {
+  .alarmPanel { grid-template-columns: 1fr; }
+}
+.column { display: flex; flex-direction: column; min-width: 0; }
+.columnHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 2px 5px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.columnBody { max-height: 200px; overflow-y: auto; padding-right: 2px; }
 
 /* The title bar stays pinned above the scroller. */
 .header { flex: none; }

@@ -157,6 +157,20 @@ export function ClockApp(): React.ReactElement {
   }, [state, sessionId])
 
   const alarms = state === null ? [] : state.alarms
+  // Two lists, because they answer different questions: what is still going to
+  // happen, and what already did. They sort in opposite directions on purpose -
+  // the soonest pending alarm first, the most recent settled one first.
+  const pendingAlarms = useMemo(
+    () => alarms.filter((alarm) => alarm.status === 'pending').sort((left, right) => left.at - right.at),
+    [alarms],
+  )
+  const settledAlarms = useMemo(
+    () =>
+      alarms
+        .filter((alarm) => alarm.status !== 'pending')
+        .sort((left, right) => (right.firedAt ?? right.at) - (left.firedAt ?? left.at)),
+    [alarms],
+  )
   const byDay = useMemo(() => alarmsByDay(alarms, zone), [alarms, zone])
   const grid = useMemo(
     () => monthGrid(cursor.year, cursor.month, todayKey()),
@@ -319,17 +333,46 @@ export function ClockApp(): React.ReactElement {
           }),
         ),
       ),
-      React.createElement('div', { className: styles.listWrap },
-        alarms.length === 0
-          ? React.createElement('div', { className: styles.empty }, '还没有任何唤醒。选一个日期和时间，填上关键词即可。')
-          : alarms.map((alarm) => React.createElement(AlarmRow, {
-              key: alarm.id,
-              alarm,
-              now,
-              onFire: (id: string) => { void act('/alarms/fire', id) },
-              onCancel: (id: string) => { void act('/alarms/cancel', id) },
-              onForget: (id: string) => { void act('/alarms/forget', id) },
-            })),
+      // Two scroll windows rather than one growing block: past a handful of
+      // alarms a single list pushes the form off the panel, and the two groups
+      // are what a person actually manages against each other.
+      React.createElement('div', { className: styles.alarmPanel },
+        React.createElement('div', { className: styles.column },
+          React.createElement('div', { className: styles.columnHead },
+            React.createElement('span', null, '待触发'),
+            React.createElement('span', null, String(pendingAlarms.length)),
+          ),
+          React.createElement('div', { className: styles.columnBody },
+            pendingAlarms.length === 0
+              ? React.createElement('div', { className: styles.empty }, '没有待触发的唤醒')
+              : pendingAlarms.map((alarm) => React.createElement(AlarmRow, {
+                  key: alarm.id,
+                  alarm,
+                  now,
+                  onFire: (id: string) => { void act('/alarms/fire', id) },
+                  onCancel: (id: string) => { void act('/alarms/cancel', id) },
+                  onForget: (id: string) => { void act('/alarms/forget', id) },
+                })),
+          ),
+        ),
+        React.createElement('div', { className: styles.column },
+          React.createElement('div', { className: styles.columnHead },
+            React.createElement('span', null, '已结束'),
+            React.createElement('span', null, String(settledAlarms.length)),
+          ),
+          React.createElement('div', { className: styles.columnBody },
+            settledAlarms.length === 0
+              ? React.createElement('div', { className: styles.empty }, '还没有触发过的唤醒')
+              : settledAlarms.map((alarm) => React.createElement(AlarmRow, {
+                  key: alarm.id,
+                  alarm,
+                  now,
+                  onFire: (id: string) => { void act('/alarms/fire', id) },
+                  onCancel: (id: string) => { void act('/alarms/cancel', id) },
+                  onForget: (id: string) => { void act('/alarms/forget', id) },
+                })),
+          ),
+        ),
       ),
       // Every field is labelled and full width. The previous version packed the
       // time and the keyword into one flex row and put a long label plus a

@@ -466,6 +466,10 @@ export class ClockService implements SchedulerHost {
         // A broken stored list must not take the live list down with it.
       }
     }
+    // Kick the title read from the read path as well as from start(). The start
+    // attempt can run before persistence is resolvable, and this call is the
+    // moment a human is actually waiting for the titles.
+    if (rows.some((row) => row.cold && row.title === row.id)) void this.refreshStoredTitles()
     return rows.sort((left, right) => right.updatedAt - left.updatedAt)
   }
 
@@ -481,7 +485,16 @@ export class ClockService implements SchedulerHost {
   async refreshStoredTitles(): Promise<void> {
     if (this.indexing) return
     const persistence = this.persistence()
-    if (persistence === undefined) return
+    if (persistence === undefined) {
+      // Not a failure, a timing fact: this runs from start(), and at that point
+      // the persistence service is not resolvable from this plugin's context
+      // yet. Returning here without recording anything is what made every
+      // stored row show its id forever - the read was simply never attempted.
+      // listSessions() re-invokes this once the panel opens, by which time the
+      // service is up, so the index does get built.
+      this.titleIndex.lastError = 'sessionPersistence not resolvable yet'
+      return
+    }
     this.indexing = true
     try {
       const snapshots = await persistence.list()
