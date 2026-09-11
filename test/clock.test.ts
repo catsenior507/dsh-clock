@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 
 import { AlarmStore, createAlarm } from '../src/host/store.ts'
-import { ClockService, firstText, titleFromEvents } from '../src/host/service.ts'
+import { ClockService, firstText, isSubagentSession, titleFromEvents } from '../src/host/service.ts'
 import { renderWakeText, type SessionControllerLike } from '../src/host/fire.ts'
 import { resolveRequestedAt } from '../src/host/api.ts'
 import { driftVerdict, durationText, isoInZone, dateKeyInZone, isValidTimeZone } from '../src/host/time.ts'
@@ -341,6 +341,37 @@ describe('tolerant extraction', () => {
     assert.equal(titleFromEvents(events, 'fallback'), 'Real Title')
     assert.equal(titleFromEvents([events[0]!], 'fallback'), 'first question')
     assert.equal(titleFromEvents([], 'fallback'), 'fallback')
+  })
+})
+
+describe('wake targets', () => {
+  it('marks only subagent-owned conversations', () => {
+    assert.equal(isSubagentSession({ origin: 'subagent' }), true)
+    assert.equal(isSubagentSession({ origin: undefined }), false)
+    assert.equal(isSubagentSession({}), false)
+    assert.equal(isSubagentSession(undefined), false)
+  })
+
+  it('never offers a subagent conversation as a wake target', async () => {
+    // The session controller refuses an identity owned by subagent routing, so
+    // offering one would be offering a target that is guaranteed to fail.
+    const ctx = {
+      sessions: {
+        list: () => [
+          { id: 'session-root', header: { id: 'session-root', createdAt: 1 }, snapshotEvents: () => [] },
+          { id: 'child-1', header: { id: 'child-1', createdAt: 2, origin: 'subagent' }, snapshotEvents: () => [] },
+        ],
+        get: () => undefined,
+      },
+      get: () => undefined,
+      logger: { warn: () => {}, info: () => {} },
+    }
+    const service = new ClockService({ ctx: ctx as never, config: config() })
+    const rows = await service.listSessions()
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      ['session-root'],
+    )
   })
 })
 

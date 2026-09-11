@@ -12,6 +12,8 @@
  * @module dsh-clock/host/service
  */
 
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type {
   AlarmOrigin,
   ClockAlarm,
@@ -42,6 +44,8 @@ export interface SessionLike {
     readonly createdAt?: number
     readonly cwd?: string
     readonly parentSession?: string
+    /** Present and equal to 'subagent' on a conversation owned by subagent routing. */
+    readonly origin?: string
   }
   snapshotEvents?(): unknown[]
 }
@@ -54,7 +58,7 @@ export interface SessionStoreLike {
 
 /** One persisted-session snapshot, header-only. */
 interface PersistenceSnapshotLike {
-  header?: { id?: string; createdAt?: number; cwd?: string; parentSession?: string }
+  header?: { id?: string; createdAt?: number; cwd?: string; parentSession?: string; origin?: string }
   sizeBytes?: number
 }
 
@@ -149,6 +153,25 @@ export function titleFromEvents(events: readonly LogEventLike[], fallbackId: str
   return text === '' ? fallbackId : text.slice(0, 48)
 }
 
+/**
+ * Whether a conversation belongs to subagent routing.
+ *
+ * This matters because such a session can never be woken: the session
+ * controller rejects an identity whose lifecycle belongs to subagent routing
+ * (its own `ApiSessionSubagentOwnership`), so offering one in the picker would
+ * be offering a target that is guaranteed to fail.
+ *
+ * Only `origin` is consulted. Subagent headers also carry a `delegationDepth`,
+ * but a depth field is exactly the kind of thing a future version might start
+ * writing on every session, and a check that silently emptied the picker would
+ * be far worse than one that occasionally shows an extra row.
+ * @param header - a live session header or a persistence snapshot header.
+ * @returns whether the session is a subagent's.
+ */
+export function isSubagentSession(header: { origin?: string } | undefined): boolean {
+  return header?.origin === 'subagent'
+}
+
 /** Loaded plugin configuration with the data directory resolved. */
 export interface ClockServiceDeps {
   ctx: PluginContext
@@ -186,6 +209,24 @@ export class ClockService implements SchedulerHost {
     this.scheduler = new ClockScheduler(this)
     this.injectedController = deps.controller
     this.store.load()
+  }
+
+  /**
+   * Append one line to the plugin's startup log.
+   *
+   * The harness logger's output does not reach the host's captured stdout, so a
+   * plugin that activates only partly leaves no trace anywhere a maintainer can
+   * read. This is that trace: which optional services resolved, and whether the
+   * HTTP carrier and the agent tool actually mounted.
+   * @param message - the line to record.
+   */
+  note(message: string): void {
+    try {
+      mkdirSync(this.config.dataDir, { recursive: true })
+      appendFileSync(join(this.config.dataDir, 'startup.log'), new Date().toISOString() + ' ' + message + '\n', 'utf8')
+    } catch {
+      // Diagnostics must never be the thing that stops the plugin loading.
+    }
   }
 
   /** Diagnostics sink that tolerates a context without a logger. */
@@ -374,6 +415,7 @@ export class ClockService implements SchedulerHost {
     const rows: ClockSessionView[] = []
     const known = new Set<string>()
     for (const session of this.ctx.sessions?.list() ?? []) {
+      if (isSubagentSession(session.header)) continue
       const events = session.snapshotEvents === undefined ? [] : normalizeEvents(session.snapshotEvents())
       const last = events[events.length - 1]
       known.add(session.id)
@@ -390,6 +432,7 @@ export class ClockService implements SchedulerHost {
     if (persistence !== undefined) {
       try {
         for (const snapshot of await persistence.list()) {
+          if (isSubagentSession(snapshot.header)) continue
           const id = snapshot.header?.id
           if (typeof id !== 'string' || id === '' || known.has(id)) continue
           known.add(id)

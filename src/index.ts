@@ -110,15 +110,29 @@ export function apply(ctx: PluginContext, config?: Partial<ClockConfig>): void {
     void service.dispose()
   }, 'clock: lifecycle')
 
-  if (optionalService<unknown>(ctx, 'sessionController') === undefined) {
+  const controller = optionalService<unknown>(ctx, 'sessionController')
+  if (controller === undefined) {
     ctx.logger?.warn('[clock] sessionController unavailable: alarms can be created and listed, but waking is disabled')
   }
   if (service.config.useSystemScheduler && !systemSchedulerSupported()) {
     ctx.logger?.info?.('[clock] OS scheduler mirror unavailable on this platform; using the in-process timer only')
   }
 
-  mountApi(ctx, service)
-  if (service.config.exposeTool) mountTool(ctx, service)
+  const api = mountApi(ctx, service)
+  const tool = service.config.exposeTool ? mountTool(ctx, service) : 'disabled'
+  // One durable line per activation. The harness logger's output does not reach
+  // the host's captured stdout, so without this a plugin that activated only
+  // partly would leave nothing anywhere that a maintainer can read.
+  service.note(
+    'apply: sessionController=' +
+      (controller === undefined ? 'missing' : 'present') +
+      ' tool=' +
+      tool +
+      ' api=' +
+      api +
+      ' systemScheduler=' +
+      String(service.config.useSystemScheduler && systemSchedulerSupported()),
+  )
 }
 
 // Deliberately NO default export: cordis resolves a module plugin as
@@ -126,8 +140,11 @@ export function apply(ctx: PluginContext, config?: Partial<ClockConfig>): void {
 // above and every ctx.sessions read would fail with "cannot get property
 // sessions without inject".
 
-/** Mount the HTTP surface on whichever carrier this profile has. */
-function mountApi(ctx: PluginContext, service: ClockService): void {
+/**
+ * Mount the HTTP surface on whichever carrier this profile has.
+ * @returns which carrier took it, for the startup log.
+ */
+function mountApi(ctx: PluginContext, service: ClockService): string {
   const deps = { service }
   const webServer = optionalService<WebServerLike>(ctx, 'webServer')
   if (webServer !== undefined && typeof webServer.register === 'function') {
@@ -135,7 +152,7 @@ function mountApi(ctx: PluginContext, service: ClockService): void {
       const dispose = registerWebRoute(webServer, deps)
       ctx.effect?.(() => () => dispose(), 'clock: web route')
       ctx.logger?.info?.('[clock] mounted at /api/clock')
-      return
+      return 'webroute'
     } catch (error) {
       ctx.logger?.warn?.('[clock] mounting the webServer route failed; falling back to a local port: ' + String(error))
     }
@@ -150,16 +167,31 @@ function mountApi(ctx: PluginContext, service: ClockService): void {
     .catch((error: unknown) => {
       ctx.logger?.warn?.('[clock] local API port unavailable: ' + String(error))
     })
+  return 'standalone'
 }
 
-/** Register the model-facing clock tool when a tool registry exists. */
-function mountTool(ctx: PluginContext, service: ClockService): void {
-  const tools = optionalService<ToolRegistryLike>(ctx, 'tools')
-  if (tools === undefined || typeof tools.register !== 'function') return
+/**
+ * Register the model-facing clock tool when a tool registry exists.
+ *
+ * The injected property is tried before the reflective lookup on purpose. The
+ * `tools` service is declared in `inject`, so cordis has already placed it on
+ * the context as a property; the reflective `ctx.get()` path is a fallback for
+ * versions that expose it differently, not the primary route.
+ * @param ctx - the plugin context.
+ * @param service - the clock service.
+ * @returns the outcome, for the startup log.
+ */
+function mountTool(ctx: PluginContext, service: ClockService): string {
+  const injected = (ctx as unknown as { tools?: ToolRegistryLike }).tools
+  const tools = injected ?? optionalService<ToolRegistryLike>(ctx, 'tools')
+  if (tools === undefined) return 'no-registry'
+  if (typeof tools.register !== 'function') return 'registry-without-register'
   try {
     const dispose = registerTool(tools, service)
     ctx.effect?.(() => () => dispose(), 'clock: clock tool')
+    return 'registered'
   } catch (error) {
     ctx.logger?.warn?.('[clock] registering the clock tool failed: ' + String(error))
+    return 'threw:' + String(error).slice(0, 120)
   }
 }
