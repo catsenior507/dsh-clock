@@ -54,8 +54,8 @@ dsh plugin --profile web add <git-url>
 ```
 
 Then **restart dsh web** so it loads — the [dsh-web-watchdog](https://github.com/catsenior507/dsh-web-watchdog)
-panel's restart button is the quick way. A ⏰ button appears in the bottom-left corner; drag it anywhere, the
-position is remembered.
+panel's restart button is the quick way. A **日历** button then appears in the sidebar foot, directly above
+Settings; it opens the panel.
 
 ## Use
 
@@ -131,7 +131,8 @@ plugin is disposed.
   for recurrence.
 - **One OS task, shared name.** The task is named `dsh-clock-wake`, so two hosts on one machine would fight
   over it. The in-process timer is unaffected.
-- The `⏰` panel is a floating body-level surface, so it is not themeable through the shell's slots.
+- The trigger is a real slot registration (`sidebar.footer.action`), but the panel it opens is a body-level
+  floating surface, so the panel itself is not themeable through the shell's slots.
 
 ## HTTP API
 

@@ -9,7 +9,7 @@
  * @module dsh-clock/client/panel
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ClockAlarm, ClockStateView } from '../shared/types.ts'
 import styles from './clock.module.css'
 import {
@@ -23,9 +23,7 @@ import {
   instantFromLocal,
   monthGrid,
 } from './clock.ts'
-
-/** localStorage key for the launcher position. */
-const POSITION_KEY = 'dsh-clock:launcher'
+import { setOpen, useOpen } from './bus.ts'
 
 /** Browser zone, which is the zone the user is picking times in. */
 function browserZone(): string {
@@ -39,20 +37,6 @@ function browserZone(): string {
 /** Today as YYYY-MM-DD in the browser zone. */
 function todayKey(): string {
   return formatDate(Date.now(), browserZone())
-}
-
-/** Read the remembered launcher position. */
-function loadPosition(): { x: number; y: number } {
-  try {
-    const raw = window.localStorage.getItem(POSITION_KEY)
-    if (raw !== null) {
-      const parsed = JSON.parse(raw) as { x?: number; y?: number }
-      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') return { x: parsed.x, y: parsed.y }
-    }
-  } catch {
-    // A blocked localStorage simply means the default position every time.
-  }
-  return { x: 18, y: window.innerHeight - 60 }
 }
 
 /** One alarm row. */
@@ -122,7 +106,8 @@ function AlarmRow(props: {
 
 /** The whole panel: launcher plus the surface it opens. */
 export function ClockApp(): React.ReactElement {
-  const [open, setOpen] = useState(false)
+  // Open state lives on the module bus: the trigger is a different React tree.
+  const open = useOpen()
   const [state, setState] = useState<ClockStateView | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [cursor, setCursor] = useState(() => {
@@ -136,8 +121,6 @@ export function ClockApp(): React.ReactElement {
   const [sessionId, setSessionId] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [position, setPosition] = useState(() => loadPosition())
-  const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null)
 
   const zone = state === null ? browserZone() : state.timeZone
 
@@ -227,57 +210,30 @@ export function ClockApp(): React.ReactElement {
     [refresh],
   )
 
+  // Escape closes the panel. A pointer press outside it is deliberately not
+  // bound: the trigger lives in the sidebar, and a dismissal racing the
+  // trigger's own click would close the panel the instant it opened.
   useEffect(() => {
-    const move = (event: MouseEvent): void => {
-      const current = drag.current
-      if (current === null) return
-      current.moved = true
-      setPosition({ x: event.clientX - current.dx, y: event.clientY - current.dy })
+    if (!open) return undefined
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
     }
-    const up = (): void => {
-      const current = drag.current
-      drag.current = null
-      if (current === null || !current.moved) return
-      try {
-        window.localStorage.setItem(POSITION_KEY, JSON.stringify(position))
-      } catch {
-        // A blocked localStorage keeps the position for this page only.
-      }
-    }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
-    return () => {
-      window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', up)
-    }
-  }, [position])
-
-  const panelLeft = Math.max(12, Math.min(position.x, window.innerWidth - 404))
-  const panelBottom = Math.max(12, Math.min(window.innerHeight - position.y + 50, window.innerHeight - 160))
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
   const pendingCount = alarms.filter((alarm) => alarm.status === 'pending').length
 
+  // The panel is mounted by the plugin root on the document body, not by the
+  // slot, so it survives the sidebar collapsing and is not clipped by its column.
   return React.createElement(React.Fragment, null,
-    React.createElement('button', {
-      className: styles.launcher,
-      style: { left: position.x, top: position.y },
-      title: '时钟与日历（可拖动）',
-      'aria-label': '打开时钟与日历',
-      onMouseDown: (event: React.MouseEvent) => {
-        drag.current = { dx: event.clientX - position.x, dy: event.clientY - position.y, moved: false }
-      },
-      onClick: () => {
-        if (drag.current === null) setOpen((value) => !value)
-      },
-    },
-      React.createElement('span', { style: { fontSize: '18px' } }, '⏰'),
-      pendingCount > 0 ? React.createElement('span', { className: styles.launcherBadge }, String(pendingCount)) : null,
-    ),
     !open ? null : React.createElement('div', {
       className: styles.panel,
-      style: { left: panelLeft, bottom: panelBottom },
+      role: 'dialog',
+      'aria-label': '时钟与日历',
+      style: { left: 16, bottom: 84 },
     },
       React.createElement('div', { className: styles.header },
-        React.createElement('span', { className: styles.title }, '时钟与日历'),
+        React.createElement('span', { className: styles.title }, pendingCount > 0 ? '时钟与日历 · ' + String(pendingCount) + ' 个待触发' : '时钟与日历'),
         React.createElement('span', { className: styles.headerSpacer }),
         React.createElement('button', { className: styles.iconButton, onClick: () => setOpen(false), title: '关闭' }, '✕'),
       ),

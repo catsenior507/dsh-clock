@@ -62,22 +62,33 @@
 }
 .launcher:hover { transform: scale(1.06); border-color: var(--accent); }
 .launcher:active { cursor: grabbing; }
-.launcherBadge {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  border-radius: 9px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
+/*
+ * The sidebar button lives in the SHELL's tree, not inside .root, so it cannot
+ * see the variables declared above and must not pretend to: it borrows the
+ * shell's own alias tokens instead, and falls back to currentColor. That keeps
+ * it consistent with the Settings trigger it sits beside under every skin.
+ */
+.sidebarButton {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: 0 0;
+  color: var(--dsw-alias-label-tertiary, currentColor);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  opacity: 0.85;
 }
+.sidebarButton:hover { background: rgba(127, 127, 127, 0.14); opacity: 1; }
+.sidebarButtonActive { opacity: 1; background: rgba(127, 127, 127, 0.14); }
+.sidebarIcon { font-size: 15px; line-height: 1; }
+.sidebarLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .panel {
   position: fixed;
