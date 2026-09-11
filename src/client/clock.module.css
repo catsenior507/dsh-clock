@@ -81,8 +81,13 @@
   min-height: 28px;
   padding: 0 10px;
   white-space: nowrap;
-  /* A visible outline, so it reads as a control rather than as a plain label. */
-  border: 1px solid rgba(127, 127, 127, 0.35);
+  /*
+   * Transparent at rest, exactly like the sibling plugin's sidebar control: a
+   * standing outline reads as a white box around the icon on a light sidebar.
+   * The border is still declared so the button does not resize on hover, when
+   * only its colour changes.
+   */
+  border: 1px solid transparent;
   border-radius: 6px;
   background: 0 0;
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-tertiary, currentColor));
@@ -92,7 +97,7 @@
   text-align: left;
   opacity: 0.85;
 }
-.sidebarButton:hover { background: rgba(127, 127, 127, 0.14); opacity: 1; }
+.sidebarButton:hover { background: rgba(127, 127, 127, 0.14); border-color: rgba(127, 127, 127, 0.35); opacity: 1; }
 .sidebarButtonActive { opacity: 1; background: rgba(127, 127, 127, 0.14); }
 .sidebarIcon { font-size: 15px; line-height: 1; }
 .sidebarLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -250,6 +255,13 @@
 .empty { color: var(--muted); text-align: center; padding: 14px 0; }
 .alarm {
   display: flex;
+  /*
+   * Actions wrap onto their own line. In the two-column board a row has roughly
+   * 290px, and three or four LABELLED buttons cannot share it with the time and
+   * the text without squeezing that text into a vertical ribbon - which is what
+   * made "waiting, 2h13m to go" unreadable rather than merely tight.
+   */
+  flex-wrap: wrap;
   gap: 9px;
   align-items: flex-start;
   padding: 8px;
@@ -265,7 +277,7 @@
 .alarmKeyword { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alarmMeta { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alarmError { color: var(--danger); font-size: 11px; }
-.alarmActions { display: flex; gap: 4px; flex: none; align-items: flex-start; }
+.alarmActions { display: flex; gap: 4px; flex: 1 0 100%; justify-content: flex-end; align-items: flex-start; }
 .pill {
   display: inline-block;
   padding: 0 6px;
@@ -274,6 +286,8 @@
   border: 1px solid var(--border);
   color: var(--muted);
   margin-right: 4px;
+  /* A status pill is one short phrase; wrapping it is always a bug. */
+  white-space: nowrap;
 }
 .pillLate { color: var(--warn); border-color: var(--warn); }
 .pillOk { color: var(--ok); border-color: var(--ok); }
