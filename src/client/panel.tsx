@@ -79,26 +79,28 @@ function AlarmRow(props: {
           : null,
         alarm.note !== undefined ? React.createElement('div', { className: styles.alarmMeta }, alarm.note) : null,
       ),
+      // Labelled actions rather than three bare glyphs: an unlabelled cross is
+      // not a delete affordance anyone can find, and the row has the width.
       React.createElement('div', { className: styles.alarmActions },
         alarm.status === 'pending'
           ? React.createElement('button', {
-              className: styles.iconButton,
-              title: '立即触发',
+              className: styles.smallButton,
+              title: '不等时间到，立刻投递',
               onClick: () => onFire(alarm.id),
-            }, '▶')
+            }, '触发')
           : null,
         alarm.status === 'pending'
           ? React.createElement('button', {
-              className: styles.iconButton,
-              title: '取消',
+              className: styles.smallButton,
+              title: '取消这次唤醒，保留记录',
               onClick: () => onCancel(alarm.id),
-            }, '⊘')
+            }, '取消')
           : null,
         React.createElement('button', {
-          className: styles.iconButton,
-          title: '删除',
+          className: styles.smallButtonDanger,
+          title: '删除这条记录',
           onClick: () => onForget(alarm.id),
-        }, '✕'),
+        }, '删除'),
       ),
     )
   )
@@ -243,6 +245,11 @@ export function ClockApp(): React.ReactElement {
       React.createElement('div', { className: styles.header },
         React.createElement('span', { className: styles.title }, pendingCount > 0 ? '时钟与日历 · ' + String(pendingCount) + ' 个待触发' : '时钟与日历'),
         React.createElement('span', { className: styles.headerSpacer }),
+        React.createElement('button', {
+          className: styles.iconButton,
+          title: '刷新',
+          onClick: () => { void refresh() },
+        }, '⟳'),
         React.createElement('button', { className: styles.iconButton, onClick: () => setOpen(false), title: '关闭' }, '✕'),
       ),
       React.createElement('div', { className: styles.clock },
@@ -320,56 +327,66 @@ export function ClockApp(): React.ReactElement {
               onForget: (id: string) => { void act('/alarms/forget', id) },
             })),
       ),
+      // Every field is labelled and full width. The previous version packed the
+      // time and the keyword into one flex row and put a long label plus a
+      // refresh button beside the create button, which squeezed the button until
+      // its text was clipped.
       React.createElement('div', { className: styles.form },
-        React.createElement('div', { className: styles.formRow },
-          React.createElement('input', {
-            className: styles.input + ' ' + styles.inputTime,
-            type: 'time',
-            value: time,
-            onChange: (event: React.ChangeEvent<HTMLInputElement>) => setTime(event.target.value),
-          }),
-          React.createElement('input', {
-            className: styles.input,
-            placeholder: '关键词，例如：继续迁移',
-            value: keyword,
-            onChange: (event: React.ChangeEvent<HTMLInputElement>) => setKeyword(event.target.value),
-          }),
+        React.createElement('div', { className: styles.field },
+          React.createElement('span', { className: styles.fieldLabel }, '唤醒日期与时间'),
+          React.createElement('div', { className: styles.fieldRow },
+            React.createElement('input', {
+              className: styles.input + ' ' + styles.inputDate,
+              type: 'date',
+              value: selectedDay,
+              onChange: (event: React.ChangeEvent<HTMLInputElement>) => setSelectedDay(event.target.value),
+            }),
+            React.createElement('input', {
+              className: styles.input + ' ' + styles.inputTimeFlex,
+              type: 'time',
+              value: time,
+              onChange: (event: React.ChangeEvent<HTMLInputElement>) => setTime(event.target.value),
+            }),
+          ),
         ),
-        React.createElement('div', { className: styles.formRow },
+        React.createElement('div', { className: styles.field },
+          React.createElement('span', { className: styles.fieldLabel }, '唤醒哪个对话'),
           React.createElement('select', {
-            className: styles.select,
+            className: styles.input,
             value: sessionId,
             onChange: (event: React.ChangeEvent<HTMLSelectElement>) => setSessionId(event.target.value),
           },
-            React.createElement('option', { value: '' }, '选择要唤醒的对话…'),
+            React.createElement('option', { value: '' }, '— 请选择一个对话 —'),
             (state === null ? [] : state.sessions).map((row) =>
               React.createElement('option', { key: row.id, value: row.id },
-                (row.cold ? '（未打开）' : '') + (row.title === '' ? row.id : row.title),
+                (row.cold ? '（未打开，到时会被唤醒）' : '') + (row.title === '' ? row.id : row.title),
               ),
             ),
           ),
         ),
-        React.createElement('div', { className: styles.formRow },
+        React.createElement('div', { className: styles.field },
+          React.createElement('span', { className: styles.fieldLabel }, '关键词（唤醒消息用它开头）'),
           React.createElement('input', {
             className: styles.input,
-            placeholder: '备注（可选）：唤醒时要做什么',
+            placeholder: '例如：继续迁移',
+            value: keyword,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => setKeyword(event.target.value),
+          }),
+        ),
+        React.createElement('div', { className: styles.field },
+          React.createElement('span', { className: styles.fieldLabel }, '唤醒内容（可选，被唤醒的对话会读到）'),
+          React.createElement('input', {
+            className: styles.input,
+            placeholder: '例如：检查构建是否结束',
             value: note,
             onChange: (event: React.ChangeEvent<HTMLInputElement>) => setNote(event.target.value),
           }),
         ),
-        React.createElement('div', { className: styles.formRow },
-          React.createElement('button', {
-            className: styles.button,
-            disabled: busy,
-            onClick: () => { void submit() },
-          }, '在 ' + selectedDay + ' ' + time + ' 唤醒'),
-          React.createElement('span', { className: styles.headerSpacer }),
-          React.createElement('button', {
-            className: styles.iconButton,
-            title: '刷新',
-            onClick: () => { void refresh() },
-          }, '⟳'),
-        ),
+        React.createElement('button', {
+          className: styles.button + ' ' + styles.buttonBlock,
+          disabled: busy,
+          onClick: () => { void submit() },
+        }, busy ? '创建中…' : '创建唤醒'),
         state !== null && state.scheduler.systemScheduler
           ? React.createElement('div', { className: styles.hint },
               '系统计划任务：' +

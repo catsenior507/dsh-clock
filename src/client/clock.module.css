@@ -234,7 +234,7 @@
 .alarmKeyword { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alarmMeta { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alarmError { color: var(--danger); font-size: 11px; }
-.alarmActions { display: flex; gap: 2px; }
+.alarmActions { display: flex; gap: 4px; flex: none; align-items: flex-start; }
 .pill {
   display: inline-block;
   padding: 0 6px;
@@ -248,7 +248,37 @@
 .pillOk { color: var(--ok); border-color: var(--ok); }
 
 .form { border-top: 1px solid var(--border); padding: 10px 12px 12px; background: var(--surface-2); }
-.formRow { display: flex; gap: 6px; margin-bottom: 6px; }
+.formRow { display: flex; gap: 6px; }
+
+/*
+ * One labelled block per field. The label owns its own line so a long one can
+ * never compete with the control for width, which is what squeezed the create
+ * button until its text was clipped when both shared a row.
+ */
+.field { margin-bottom: 8px; }
+.fieldLabel { display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+.fieldRow { display: flex; gap: 6px; }
+.inputDate { flex: 1 1 60%; min-width: 0; }
+.inputTimeFlex { flex: 1 1 40%; min-width: 0; }
+
+/* The primary action owns its row, so its text always fits. */
+.buttonBlock { display: block; width: 100%; padding: 9px 12px; margin-top: 2px; }
+
+/* Row actions: labelled and finger-sized rather than bare glyphs. */
+.smallButton, .smallButtonDanger {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.smallButton:hover { border-color: var(--accent); color: var(--accent); }
+.smallButtonDanger:hover { border-color: var(--danger); color: var(--danger); }
 .input, .select, .textarea {
   width: 100%;
   background: var(--surface);
