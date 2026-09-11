@@ -1,0 +1,73 @@
+{
+  "name": "@dsh-external/dsh-client-plugin-clock",
+  "description": "Calendar and clock for DeepSeek Harness: set an alarm that wakes a chosen conversation at a chosen instant, by keyword, with the system time and the drift injected into the wake. In-process timer plus a Windows Task Scheduler mirror.",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "node --test test/"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/catsenior507/dsh-clock.git"
+  },
+  "homepage": "https://github.com/catsenior507/dsh-clock#readme",
+  "bugs": {
+    "url": "https://github.com/catsenior507/dsh-clock/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "cordis-plugin",
+    "alarm",
+    "reminder",
+    "scheduler",
+    "task-scheduler",
+    "calendar",
+    "clock",
+    "timezone",
+    "wake",
+    "llm-agent",
+    "typescript"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^20.12.10",
+    "@types/react": "^18.2.66",
+    "@types/react-dom": "^18.2.22",
+    "lightningcss": "^1.32.0",
+    "tsdown": "0.22.14",
+    "typescript": "^5.4.5"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}

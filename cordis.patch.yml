@@ -1,0 +1,6 @@
+# dsh-clock bundle patch: inserts the host half (alarm store, three trigger layers,
+# wake delivery, HTTP API, agent tool) and its calendar/clock panel into the web roster.
+# Install with `dsh plugin --profile web add <path-or-git-url>`.
+- insert:
+    - id: ui-clock
+      name: '@dsh-external/dsh-client-plugin-clock'
