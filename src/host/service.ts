@@ -199,6 +199,22 @@ export class ClockService implements SchedulerHost {
   private started = false
   /** Cached titles for stored conversations, filled in the background. */
   private readonly storedTitles = new Map<string, string>()
+  /**
+   * What the background title read actually did.
+   *
+   * A cold conversation whose log cannot be read simply falls back to showing
+   * its id, which is indistinguishable from "this conversation has no title".
+   * These counters are what makes the difference visible from outside.
+   */
+  private readonly titleIndex = {
+    snapshots: 0,
+    attempted: 0,
+    titled: 0,
+    failed: 0,
+    rawEvents: -1,
+    sampleEventKeys: '',
+    lastError: '',
+  }
   private indexing = false
 
   /** @param deps - context, optional configuration, optional test doubles. */
@@ -469,16 +485,31 @@ export class ClockService implements SchedulerHost {
     this.indexing = true
     try {
       const snapshots = await persistence.list()
+      this.titleIndex.snapshots = snapshots.length
       for (const snapshot of snapshots) {
         const id = snapshot.header?.id
         if (typeof id !== 'string' || id === '' || this.storedTitles.has(id)) continue
+        this.titleIndex.attempted += 1
         let handle: PersistenceHandleLike | undefined
         try {
           handle = await persistence.open(id, 'read')
           const inspection = await handle.read()
-          const events = normalizeEvents(inspection.events ?? [])
-          this.storedTitles.set(id, titleFromEvents(events, id))
-        } catch {
+          const raw = inspection.events ?? []
+          if (this.titleIndex.rawEvents < 0) {
+            this.titleIndex.rawEvents = raw.length
+            const first = raw[0]
+            this.titleIndex.sampleEventKeys =
+              first === undefined || first === null || typeof first !== 'object'
+                ? '(first entry is ' + String(first) + ')'
+                : Object.keys(first as Record<string, unknown>).join(',')
+          }
+          const events = normalizeEvents(raw)
+          const title = titleFromEvents(events, id)
+          this.storedTitles.set(id, title)
+          if (title !== id) this.titleIndex.titled += 1
+        } catch (error) {
+          this.titleIndex.failed += 1
+          this.titleIndex.lastError = String(error).slice(0, 200)
           this.storedTitles.set(id, id)
         } finally {
           try {
@@ -503,6 +534,7 @@ export class ClockService implements SchedulerHost {
       alarms: this.store.all(),
       sessions: await this.listSessions(),
       scheduler: this.schedulerState,
+      titleIndex: { ...this.titleIndex },
       config: {
         port: this.config.port,
         dataDir: this.config.dataDir,

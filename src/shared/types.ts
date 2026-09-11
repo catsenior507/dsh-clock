@@ -103,6 +103,16 @@ export interface ClockStateView {
     timerArmedFor: number | null
     lastSyncError?: string
   }
+  /** What the background stored-title read did, so a title-less picker is diagnosable. */
+  titleIndex: {
+    snapshots: number
+    attempted: number
+    titled: number
+    failed: number
+    rawEvents: number
+    sampleEventKeys: string
+    lastError: string
+  }
   config: {
     port: number
     dataDir: string
