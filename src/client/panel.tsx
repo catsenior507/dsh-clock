@@ -249,6 +249,13 @@ export function ClockApp(): React.ReactElement {
         }, '⟳'),
         React.createElement('button', { className: styles.iconButton, onClick: () => setOpen(false), title: '关闭' }, '✕'),
       ),
+      // Everything under the title bar lives in ONE scroll container. Splitting
+      // the scrolling between the alarm list and the rest is what let the panel
+      // run out of height and clip the form: the title bar, the clock and the
+      // month grid are fixed height, so once those plus the form exceeded the
+      // panel's max-height there was nothing left to scroll and the lower
+      // fields simply fell off the bottom edge.
+      React.createElement('div', { className: styles.body },
       React.createElement('div', { className: styles.clock },
         React.createElement('div', { className: styles.clockTime }, formatTime(now, zone)),
         React.createElement('div', { className: styles.clockMeta },
@@ -393,6 +400,7 @@ export function ClockApp(): React.ReactElement {
             )
           : React.createElement('div', { className: styles.hint }, '系统计划任务不可用，仅使用进程内定时器'),
         error === '' ? null : React.createElement('div', { className: styles.error }, error),
+      ),
       ),
     ),
   )

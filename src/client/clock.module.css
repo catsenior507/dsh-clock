@@ -108,7 +108,8 @@
   transform: translate(-50%, -50%);
   z-index: 2147483000;
   width: min(460px, calc(100vw - 32px));
-  max-height: min(86vh, 760px);
+  /* Tall enough for the whole form on an ordinary screen; the body scrolls. */
+  max-height: min(92vh, 880px);
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -206,14 +207,17 @@
 
 /*
  * The list is the only region that may scroll. `min-height: 0` is what actually
- * lets a flex child shrink below its content size: without it the list grows to
- * fit every row, overflows the panel's max-height, and pushes the create form
- * (the only way to add an alarm) out of the clipped area entirely.
+ * lets a flex child shrink below its content size. Without it this block grows
+ * to fit all of its content, overflows the panel's max-height, and the form at
+ * the bottom is clipped away instead of being scrolled to.
  */
-.listWrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 12px; border-top: 1px solid var(--border); }
+.body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 
-/* Everything around the list keeps its natural height. */
-.header, .clock, .calendar, .form { flex: none; }
+/* The alarm list is a plain block inside that one scroller, not a second one. */
+.listWrap { padding: 8px 12px; border-top: 1px solid var(--border); }
+
+/* The title bar stays pinned above the scroller. */
+.header { flex: none; }
 .empty { color: var(--muted); text-align: center; padding: 14px 0; }
 .alarm {
   display: flex;
