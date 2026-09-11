@@ -19,6 +19,7 @@ import { AlarmStore, createAlarm } from '../src/host/store.ts'
 import { ClockService, firstText, isSubagentSession, titleFromEvents } from '../src/host/service.ts'
 import { renderWakeText, type SessionControllerLike } from '../src/host/fire.ts'
 import { corsHeaders, resolveRequestedAt } from '../src/host/api.ts'
+import { registerSkill, SKILL_BODY } from '../src/host/skill.ts'
 import { driftVerdict, durationText, isoInZone, dateKeyInZone, isValidTimeZone } from '../src/host/time.ts'
 import { resolveConfig } from '../src/host/store.ts'
 import { monthGrid, instantFromLocal, countdownText, alarmsByDay } from '../src/client/clock.ts'
@@ -341,6 +342,38 @@ describe('tolerant extraction', () => {
     assert.equal(titleFromEvents(events, 'fallback'), 'Real Title')
     assert.equal(titleFromEvents([events[0]!], 'fallback'), 'first question')
     assert.equal(titleFromEvents([], 'fallback'), 'fallback')
+  })
+})
+
+describe('bundled skill', () => {
+  it('registers one bundled, model-invocable skill and returns a disposer', () => {
+    const seen: Record<string, unknown>[] = []
+    let disposed = false
+    const dispose = registerSkill({
+      register(skill: Record<string, unknown>) {
+        seen.push(skill)
+        return () => {
+          disposed = true
+        }
+      },
+    })
+    assert.equal(seen.length, 1)
+    const skill = seen[0]!
+    assert.equal(skill.name, 'clock')
+    assert.equal(skill.source, 'bundled')
+    assert.deepEqual(skill.invocation, { modelInvocable: true, userInvocable: true })
+    assert.equal(typeof dispose, 'function')
+    dispose()
+    assert.equal(disposed, true)
+  })
+
+  it('teaches the parts the tool description cannot carry', () => {
+    // A conversation that has never seen this plugin must still learn that a
+    // target may be closed and that a late wake says so.
+    assert.match(SKILL_BODY, /sessionId/)
+    assert.match(SKILL_BODY, /closed/)
+    assert.match(SKILL_BODY, /drift/)
+    assert.match(SKILL_BODY, /host must be running/i)
   })
 })
 

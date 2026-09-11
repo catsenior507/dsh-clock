@@ -84,6 +84,12 @@ The model gets a `clock` tool:
 { "action": "cancel", "id": "a-…" }
 ```
 
+The plugin also ships a **skill** named `clock`. The tool is advertised by one line; the skill is
+how a conversation that has never seen this plugin learns the parts that line cannot carry — that a
+target may be a closed conversation, that a closed target is continued rather than forked, and that
+a wake delivered late says how late it is. It is registered as a bundled skill, so it appears in
+the catalog of every conversation in the profile.
+
 ## How the timing works
 
 Three layers, one delivery path:

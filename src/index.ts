@@ -42,6 +42,7 @@ import type { ClockConfig } from './shared/types.ts'
 import { ClockService, type PluginContext } from './host/service.ts'
 import { registerWebRoute, startStandaloneServer, type WebServerLike } from './host/api.ts'
 import { registerTool, type ToolRegistryLike } from './host/tool.ts'
+import { registerSkill, type SkillRegistryLike } from './host/skill.ts'
 import { systemSchedulerSupported } from './host/system-scheduler.ts'
 
 /** Cordis plugin name. */
@@ -120,6 +121,7 @@ export function apply(ctx: PluginContext, config?: Partial<ClockConfig>): void {
 
   const api = mountApi(ctx, service)
   const tool = service.config.exposeTool ? mountTool(ctx, service) : 'disabled'
+  const skill = mountSkill(ctx)
   // One durable line per activation. The harness logger's output does not reach
   // the host's captured stdout, so without this a plugin that activated only
   // partly would leave nothing anywhere that a maintainer can read.
@@ -130,6 +132,8 @@ export function apply(ctx: PluginContext, config?: Partial<ClockConfig>): void {
       tool +
       ' api=' +
       api +
+      ' skill=' +
+      skill +
       ' systemScheduler=' +
       String(service.config.useSystemScheduler && systemSchedulerSupported()),
   )
@@ -168,6 +172,29 @@ function mountApi(ctx: PluginContext, service: ClockService): string {
       ctx.logger?.warn?.('[clock] local API port unavailable: ' + String(error))
     })
   return 'standalone'
+}
+
+/**
+ * Contribute the clock skill to the agent's skill catalog.
+ *
+ * The tool is advertised by one line; the skill is how another conversation
+ * learns the parts that one line cannot carry - that a target may be a closed
+ * conversation, that it keeps its own id, and that an alarm set while the host
+ * is down arrives late and says so.
+ * @param ctx - the plugin context.
+ * @returns the outcome, for the startup log.
+ */
+function mountSkill(ctx: PluginContext): string {
+  const skills = optionalService<SkillRegistryLike>(ctx, 'skills')
+  if (skills === undefined || typeof skills.register !== 'function') return 'no-registry'
+  try {
+    const dispose = registerSkill(skills)
+    ctx.effect?.(() => () => dispose(), 'clock: clock skill')
+    return 'registered'
+  } catch (error) {
+    ctx.logger?.warn?.('[clock] registering the clock skill failed: ' + String(error))
+    return 'threw:' + String(error).slice(0, 120)
+  }
 }
 
 /**
