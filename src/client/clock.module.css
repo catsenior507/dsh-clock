@@ -81,10 +81,11 @@
   min-height: 28px;
   padding: 0 10px;
   white-space: nowrap;
-  border: 0;
+  /* A visible outline, so it reads as a control rather than as a plain label. */
+  border: 1px solid rgba(127, 127, 127, 0.35);
   border-radius: 6px;
   background: 0 0;
-  color: var(--dsw-alias-label-tertiary, currentColor);
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-tertiary, currentColor));
   cursor: pointer;
   font: inherit;
   font-size: 13px;

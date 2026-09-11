@@ -178,6 +178,14 @@ export async function handle(
       const fired = await service.fireOne(requiredString(body, 'id'), 'manual' satisfies FireTrigger)
       return fired === undefined ? fail(404, 'no alarm with that id') : ok(fired)
     }
+    if (method === 'POST' && path === '/client-log') {
+      // The browser half writes here. The harness logger's output never reaches
+      // anything a maintainer can read, and a client plugin that activates only
+      // partly is otherwise completely invisible from the host side.
+      const message = typeof body.message === 'string' ? body.message.slice(0, 400) : ''
+      if (message !== '') service.note('client: ' + message)
+      return ok({ recorded: message !== '' })
+    }
     if (method === 'POST' && path === '/tick') {
       // The OS scheduler's ping. It is answered immediately and the delivery
       // continues in the background: a scheduled task should not be held open

@@ -23,6 +23,7 @@ import React from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { CalendarButton } from './button'
 import { ClockApp } from './panel'
+import { report } from './clock.ts'
 import './clock.module.css'
 
 const OWNER = 'clock'
@@ -49,6 +50,11 @@ export const inject = ['slots']
  * @param ctx - the client plugin context.
  */
 export function apply(ctx: Context): void {
+  // Each step reports to the host. A client plugin that activates only partly is
+  // otherwise invisible: the browser console is not reachable from the host and
+  // the harness logger does not reach anything durable, so "the button is gone"
+  // has no evidence behind it at all.
+  report('apply:start')
   const mount = document.createElement('div')
   mount.dataset.dshClockRoot = ''
   document.body.append(mount)
@@ -57,7 +63,9 @@ export function apply(ctx: Context): void {
   try {
     root = createRoot(mount)
     root.render(React.createElement(ClockApp))
+    report('panel:mounted')
   } catch (error) {
+    report('panel:failed ' + String(error))
     mount.remove()
     throw new Error('[' + OWNER + '] mounting the calendar panel failed: ' + String(error))
   }
@@ -68,18 +76,36 @@ export function apply(ctx: Context): void {
   }, 'ui-clock: panel lifecycle')
 
   const slots = (ctx as unknown as { slots?: SlotsLike }).slots
-  if (slots === undefined || typeof slots.inject !== 'function' || typeof slots.register !== 'function') return
+  if (slots === undefined || typeof slots.inject !== 'function' || typeof slots.register !== 'function') {
+    report('slot:unusable hasSlots=' + String(slots !== undefined))
+    return
+  }
   let registered: (() => void) | undefined
-  ctx.effect(() => {
-    const outer = slots.inject(SIDEBAR_SLOT, () => {
-      registered = slots.register({ name: SIDEBAR_SLOT, id: 'clock-calendar', order: 20 }, CalendarButton) as
-        | (() => void)
-        | undefined
-      return registered
-    }) as (() => void) | undefined
-    return () => {
-      outer?.()
-      registered?.()
-    }
-  }, 'ui-clock: sidebar action')
+  try {
+    ctx.effect(() => {
+      const outer = slots.inject(SIDEBAR_SLOT, () => {
+        try {
+          registered = slots.register({ name: SIDEBAR_SLOT, id: 'clock-calendar', order: 20 }, CalendarButton) as
+            | (() => void)
+            | undefined
+          report('slot:registered ' + SIDEBAR_SLOT)
+        } catch (error) {
+          report('slot:register-threw ' + String(error))
+        }
+        return registered
+      }) as (() => void) | undefined
+      return () => {
+        outer?.()
+        registered?.()
+      }
+    }, 'ui-clock: sidebar action')
+    report('slot:inject-accepted ' + SIDEBAR_SLOT)
+  } catch (error) {
+    report('slot:inject-threw ' + String(error))
+  }
+  // The seat may not be declared yet, so a callback that has not run by now is
+  // the difference between "the shell never offered the seat" and "we failed".
+  window.setTimeout(() => {
+    if (registered === undefined) report('slot:callback-never-fired ' + SIDEBAR_SLOT)
+  }, 4000)
 }

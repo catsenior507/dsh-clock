@@ -41,6 +41,9 @@ export function CalendarButton(props: SidebarActionProps): React.ReactElement {
       onClick: () => toggleOpen(),
     },
     React.createElement('span', { className: styles.sidebarIcon, 'aria-hidden': 'true' }, '\u{1F4C5}'),
-    props.wide === false ? null : React.createElement('span', { className: styles.sidebarLabel }, '日历'),
+    // The label is never dropped. An icon-only control in the rail is exactly
+    // the thing nobody finds, and gating it on a slot prop this plugin does not
+    // own made the button's presence depend on someone else's layout decision.
+    React.createElement('span', { className: styles.sidebarLabel }, '日历'),
   )
 }

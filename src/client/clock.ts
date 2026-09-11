@@ -65,6 +65,29 @@ export async function call<T>(path: string, body?: Record<string, unknown>): Pro
   return payload.value as T
 }
 
+/**
+ * Tell the host what the browser half is doing.
+ *
+ * Deliberately silent on every failure: a diagnostic that can break the very
+ * feature it is diagnosing is worse than no diagnostic, and this runs during
+ * activation, where a rejected promise would be an unhandled rejection.
+ * @param message - one line to record.
+ */
+export function report(message: string): void {
+  void (async () => {
+    try {
+      const base = await apiBase()
+      await fetch(base + '/client-log', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+    } catch {
+      // The host is unreachable or refused the request; nothing to do.
+    }
+  })()
+}
+
 /** Read the whole panel state. */
 export function fetchState(): Promise<ClockStateView> {
   return call<ClockStateView>('/state')
