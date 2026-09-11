@@ -228,14 +228,11 @@ export function ClockApp(): React.ReactElement {
   // The panel is mounted by the plugin root on the document body, not by the
   // slot, so it survives the sidebar collapsing and is not clipped by its column.
   return React.createElement(React.Fragment, null,
-    // The backdrop dims the page and gives the pointer somewhere to land that
-    // is not the panel. Centring is the stylesheet's job, so the panel itself
-    // carries no inline geometry.
-    !open ? null : React.createElement('div', {
-      className: styles.backdrop,
-      'aria-hidden': 'true',
-      onClick: () => setOpen(false),
-    }),
+    // Deliberately NO backdrop. A full-screen overlay with a stacking order
+    // above the shell dims the whole page and swallows every click behind it -
+    // including the sidebar's own Settings control, which then reads as
+    // "the page is broken and Settings is gone". Centring is the stylesheet's
+    // job; dismissal is Escape or the close button.
     !open ? null : React.createElement('div', {
       className: styles.panel,
       role: 'dialog',

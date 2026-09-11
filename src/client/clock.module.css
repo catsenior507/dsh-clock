@@ -13,7 +13,6 @@
  * They used to live on `.root`, which nothing ever wore, so every var(--surface)
  * resolved to nothing and the panel painted itself transparent.
  */
-.backdrop,
 .panel {
   --surface: #16181d;
   --surface-2: #1e2128;
@@ -28,15 +27,8 @@
   --warn: #e2b04a;
 }
 
-.backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 2147482999;
-  background: rgba(0, 0, 0, 0.45);
-}
 
 @media (prefers-color-scheme: light) {
-  .backdrop,
   .panel {
     --surface: #ffffff;
     --surface-2: #f5f6f8;
@@ -79,10 +71,16 @@
 .sidebarButton {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
+  justify-content: center;
+  gap: 6px;
+  /*
+   * Not width:100%. This seat is a centred flex row inside the sidebar foot,
+   * and a child claiming the full row is the kind of thing that silently
+   * reflows the neighbourhood it was invited into.
+   */
   min-height: 28px;
-  padding: 0 8px;
+  padding: 0 10px;
+  white-space: nowrap;
   border: 0;
   border-radius: 6px;
   background: 0 0;
