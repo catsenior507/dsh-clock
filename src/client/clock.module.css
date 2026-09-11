@@ -8,7 +8,13 @@
  * with whatever conversation was behind it.
  */
 
-.root {
+/*
+ * The variables are declared on the two surfaces this plugin actually renders.
+ * They used to live on `.root`, which nothing ever wore, so every var(--surface)
+ * resolved to nothing and the panel painted itself transparent.
+ */
+.backdrop,
+.panel {
   --surface: #16181d;
   --surface-2: #1e2128;
   --surface-3: #272b34;
@@ -20,16 +26,18 @@
   --danger: #ef6b6b;
   --ok: #5ec98a;
   --warn: #e2b04a;
+}
+
+.backdrop {
   position: fixed;
-  z-index: 2147483000;
-  font-family: ui-sans-serif, system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text);
+  inset: 0;
+  z-index: 2147482999;
+  background: rgba(0, 0, 0, 0.45);
 }
 
 @media (prefers-color-scheme: light) {
-  .root {
+  .backdrop,
+  .panel {
     --surface: #ffffff;
     --surface-2: #f5f6f8;
     --surface-3: #eceef2;
@@ -91,16 +99,29 @@
 .sidebarLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .panel {
+  /*
+   * Centred as a dialog rather than pinned to a corner: it is opened from the
+   * sidebar foot and is the only place an alarm can be created, so it needs the
+   * room and the focus. translate() centres it without knowing its own size.
+   */
   position: fixed;
-  width: 392px;
-  max-height: min(78vh, 660px);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2147483000;
+  width: min(460px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
   display: flex;
   flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+  font-family: ui-sans-serif, system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 .header {

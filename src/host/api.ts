@@ -197,7 +197,46 @@ export async function handle(
 }
 
 /** Adapt the handler table to a Node request/response pair. */
+/**
+ * CORS headers for a request that came from this machine.
+ *
+ * The panel is served by the harness web server on one port while this carrier
+ * listens on another, so every call the panel makes is cross-origin and the
+ * browser discards the response without these headers. That failure looks like
+ * a panel that renders but can never save anything, because it is silent in the
+ * page and never reaches this handler as an error.
+ *
+ * The allowed origin is ECHOED rather than set to a wildcard. Creating an alarm
+ * ends in a message injected into a conversation, so `*` would let any page the
+ * user happens to visit schedule a prompt injection against their own agent.
+ * Only loopback origins are accepted.
+ * @param origin - the request's Origin header, when present.
+ * @returns headers to merge into the response.
+ */
+export function corsHeaders(origin: string | undefined): Record<string, string> {
+  if (origin === undefined) return {}
+  try {
+    const host = new URL(origin).hostname
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return {}
+    return {
+      'access-control-allow-origin': origin,
+      'access-control-allow-methods': 'GET, POST, OPTIONS',
+      'access-control-allow-headers': 'content-type',
+      'access-control-max-age': '600',
+      vary: 'Origin',
+    }
+  } catch {
+    return {}
+  }
+}
+
 async function nodeHandler(deps: ApiDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const cors = corsHeaders(req.headers.origin)
+  if ((req.method ?? 'GET').toUpperCase() === 'OPTIONS') {
+    res.writeHead(204, cors)
+    res.end()
+    return
+  }
   let response: ApiResponse
   try {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -212,6 +251,7 @@ async function nodeHandler(deps: ApiDeps, req: IncomingMessage, res: ServerRespo
   }
   const payload = JSON.stringify(response.body)
   res.writeHead(response.status, {
+    ...cors,
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
     'cache-control': 'no-store',

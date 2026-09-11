@@ -226,11 +226,19 @@ export function ClockApp(): React.ReactElement {
   // The panel is mounted by the plugin root on the document body, not by the
   // slot, so it survives the sidebar collapsing and is not clipped by its column.
   return React.createElement(React.Fragment, null,
+    // The backdrop dims the page and gives the pointer somewhere to land that
+    // is not the panel. Centring is the stylesheet's job, so the panel itself
+    // carries no inline geometry.
+    !open ? null : React.createElement('div', {
+      className: styles.backdrop,
+      'aria-hidden': 'true',
+      onClick: () => setOpen(false),
+    }),
     !open ? null : React.createElement('div', {
       className: styles.panel,
       role: 'dialog',
+      'aria-modal': 'true',
       'aria-label': '时钟与日历',
-      style: { left: 16, bottom: 84 },
     },
       React.createElement('div', { className: styles.header },
         React.createElement('span', { className: styles.title }, pendingCount > 0 ? '时钟与日历 · ' + String(pendingCount) + ' 个待触发' : '时钟与日历'),

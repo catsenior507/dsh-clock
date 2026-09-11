@@ -18,7 +18,7 @@ import { after, describe, it } from 'node:test'
 import { AlarmStore, createAlarm } from '../src/host/store.ts'
 import { ClockService, firstText, isSubagentSession, titleFromEvents } from '../src/host/service.ts'
 import { renderWakeText, type SessionControllerLike } from '../src/host/fire.ts'
-import { resolveRequestedAt } from '../src/host/api.ts'
+import { corsHeaders, resolveRequestedAt } from '../src/host/api.ts'
 import { driftVerdict, durationText, isoInZone, dateKeyInZone, isValidTimeZone } from '../src/host/time.ts'
 import { resolveConfig } from '../src/host/store.ts'
 import { monthGrid, instantFromLocal, countdownText, alarmsByDay } from '../src/client/clock.ts'
@@ -341,6 +341,24 @@ describe('tolerant extraction', () => {
     assert.equal(titleFromEvents(events, 'fallback'), 'Real Title')
     assert.equal(titleFromEvents([events[0]!], 'fallback'), 'first question')
     assert.equal(titleFromEvents([], 'fallback'), 'fallback')
+  })
+})
+
+describe('cross-origin access', () => {
+  it('echoes a loopback origin so the panel can call the private carrier', () => {
+    // The panel is served from the harness web server and the carrier listens on
+    // another port, so every call it makes is cross-origin.
+    const headers = corsHeaders('http://127.0.0.1:3080')
+    assert.equal(headers['access-control-allow-origin'], 'http://127.0.0.1:3080')
+    assert.match(headers['access-control-allow-methods'] ?? '', /POST/)
+    assert.equal(corsHeaders('http://localhost:3080')['access-control-allow-origin'], 'http://localhost:3080')
+  })
+
+  it('refuses any other origin, because an alarm ends in an injected message', () => {
+    assert.deepEqual(corsHeaders('https://evil.example.com'), {})
+    assert.deepEqual(corsHeaders('http://127.0.0.1.evil.com'), {})
+    assert.deepEqual(corsHeaders(undefined), {})
+    assert.deepEqual(corsHeaders('not a url'), {})
   })
 })
 
