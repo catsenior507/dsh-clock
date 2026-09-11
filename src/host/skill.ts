@@ -9,6 +9,10 @@
  * The skill is that knowledge, loaded on demand instead of carried in every
  * request.
  *
+ * The body is assembled from an array rather than written as one long string
+ * literal: it is markdown full of backticks, quotes and blank lines, and every
+ * one of those is an escaping mistake waiting to happen inside a literal.
+ *
  * @module dsh-clock/host/skill
  */
 
@@ -24,7 +28,83 @@ export const SKILL_WHEN_TO_USE =
   'Use when something should happen at a set time rather than now: a reminder the user asked for, a slow job to check back on, or work that must resume in a different conversation.'
 
 /** The markdown body the model reads when it loads the skill. */
-export const SKILL_BODY = "# clock — schedule a wake-up\n\n`clock` schedules a message to arrive in a conversation at a chosen instant. The message opens\nwith a keyword you choose, and it carries the scheduled time, the actual time, and the signed\ndrift, so the conversation that gets woken can tell \"on time\" from \"three hours late\".\n\n## When to use it\n\n- The user says \"remind me\", \"come back to this in an hour\", \"check the build at 17:00\".\n- You are starting something slow and know you should return to it.\n- Work should resume later in a **different** conversation, including one that is currently\n  closed. That is the case this exists for: the harness's own reminders are session-local and\n  cannot reach a conversation nobody has open.\n\nDo not use it as a notification channel. It delivers into a dsh conversation — not to a phone,\nnot by mail, not by push.\n\n## Actions\n\n| action | what it does |\n| --- | --- |\n| `now` | the current time, in a zone |\n| `set` | create a wake-up |\n| `list` | pending and recent alarms, with any delivery error |\n| `cancel` | cancel one by `id`, or `all: true` for every pending alarm of this conversation |\n\n## Setting one\n\nRelative delay, waking this conversation:\n\n    clock { action: \"set\", afterSeconds: 2700, keyword: \"check the build\",\n            note: \"the release job should be done by now\" }\n\nAbsolute instant, waking another conversation — including a closed one:\n\n    clock { action: \"set\", at: \"2026-09-11T09:30:00+08:00\", timeZone: \"Asia/Shanghai\",\n            keyword: \"standup\", sessionId: \"session-…\" }\n\n`sessionId` defaults to the calling conversation. A closed target is resumed before the message\nlands and **keeps its own id** — it is continued, not forked. Give `at` an explicit offset, or\npass `timeZone`, because an unqualified local time is a guess about which machine meant it.\n\n## What the woken conversation receives\n\n    ⏰ dsh-clock wake — keyword: check the build\n\n    scheduled  2026-09-11T09:30:00+08:00  [Asia/Shanghai]\n    now        2026-09-11T11:43:12+08:00  [Asia/Shanghai]\n    drift      +2h13m  OVERDUE\n    trigger    in-process timer\n\n    warning    OVERDUE by +2h13m: the host was not running at the scheduled instant …\n    note       This message was delivered by a timer, not typed by the user. …\n    detail     the release job should be done by now\n\n## Limits worth stating before you rely on one\n\n- **The host must be running.** Only the host can resume a conversation, so if dsh web is not up\n  at the scheduled instant the alarm is delivered as soon as it is, and says how late it is.\n  Nothing reaches the user while the machine is off.\n- **One-shot only.** There is no recurring rule; set another alarm if you need one.\n- A failed delivery is recorded on the alarm rather than lost — `list` shows the error.\n"
+export const SKILL_BODY: string = [
+  "# clock — schedule a wake-up",
+  "",
+  "`clock` schedules a message to arrive in a conversation at a chosen instant. The message opens",
+  "with a keyword you choose, and it carries the scheduled time, the actual time, and the signed",
+  "drift, so the conversation that gets woken can tell \"on time\" from \"three hours late\".",
+  "",
+  "## When to use it",
+  "",
+  "- The user says \"remind me\", \"come back to this in an hour\", \"check the build at 17:00\".",
+  "- You are starting something slow and know you should return to it.",
+  "- Work should resume later in a **different** conversation, including one that is currently",
+  "  closed. That is the case this exists for: the harness's own reminders are session-local and",
+  "  cannot reach a conversation nobody has open.",
+  "",
+  "Do not use it as a notification channel. It delivers into a dsh conversation — not to a phone,",
+  "not by mail, not by push.",
+  "",
+  "## Actions",
+  "",
+  "| action | what it does |",
+  "| --- | --- |",
+  "| `now` | the current time, in a zone |",
+  "| `set` | create a wake-up |",
+  "| `update` | change one that is still pending — instant, keyword, content, or target |",
+  "| `list` | pending and recent alarms, with any delivery error |",
+  "| `cancel` | cancel one by `id`, or `all: true` for every pending alarm of this conversation |",
+  "",
+  "## Setting one",
+  "",
+  "Relative delay, waking this conversation:",
+  "",
+  "    clock { action: \"set\", afterSeconds: 2700, keyword: \"check the build\",",
+  "            note: \"the release job should be done by now\" }",
+  "",
+  "Absolute instant, waking another conversation — including a closed one:",
+  "",
+  "    clock { action: \"set\", at: \"2026-09-11T09:30:00+08:00\", timeZone: \"Asia/Shanghai\",",
+  "            keyword: \"standup\", sessionId: \"session-…\" }",
+  "",
+  "`sessionId` defaults to the calling conversation. A closed target is resumed before the message",
+  "lands and **keeps its own id** — it is continued, not forked. Give `at` an explicit offset, or",
+  "pass `timeZone`, because an unqualified local time is a guess about which machine meant it.",
+  "",
+  "## Changing one that has not fired yet",
+  "",
+  "    clock { action: \"update\", id: \"a-…\", afterSeconds: 600, keyword: \"try again\",",
+  "            note: \"\" }",
+  "",
+  "Pass only the fields that should change. `note: \"\"` clears the note; omitting `note` leaves it",
+  "alone. A new instant re-arms both trigger layers immediately.",
+  "",
+  "`update` refuses an alarm that already fired or was cancelled. Editing one would promise a",
+  "delivery that is not going to happen — set a new one instead.",
+  "",
+  "## What the woken conversation receives",
+  "",
+  "    ⏰ dsh-clock wake — keyword: check the build",
+  "",
+  "    scheduled  2026-09-11T09:30:00+08:00  [Asia/Shanghai]",
+  "    now        2026-09-11T11:43:12+08:00  [Asia/Shanghai]",
+  "    drift      +2h13m  OVERDUE",
+  "    trigger    in-process timer",
+  "",
+  "    warning    OVERDUE by +2h13m: the host was not running at the scheduled instant …",
+  "    note       This message was delivered by a timer, not typed by the user. …",
+  "    detail     the release job should be done by now",
+  "",
+  "## Limits worth stating before you rely on one",
+  "",
+  "- **The host must be running.** Only the host can resume a conversation, so if dsh web is not up",
+  "  at the scheduled instant the alarm is delivered as soon as it is, and says how late it is.",
+  "  Nothing reaches the user while the machine is off.",
+  "- **One-shot only.** There is no recurring rule; set another alarm if you need one.",
+  "- A failed delivery is recorded on the alarm rather than lost — `list` shows the error.",
+  "",
+].join('\n')
 
 /** The skill registry, narrowed to the one method used. */
 export interface SkillRegistryLike {

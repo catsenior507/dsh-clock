@@ -18,6 +18,7 @@ import { after, describe, it } from 'node:test'
 import { AlarmStore, createAlarm } from '../src/host/store.ts'
 import { ClockService, firstText, isSubagentSession, titleFromEvents } from '../src/host/service.ts'
 import { renderWakeText, type SessionControllerLike } from '../src/host/fire.ts'
+import { buildTool } from '../src/host/tool.ts'
 import { corsHeaders, resolveRequestedAt } from '../src/host/api.ts'
 import { registerSkill, SKILL_BODY } from '../src/host/skill.ts'
 import { driftVerdict, durationText, isoInZone, dateKeyInZone, isValidTimeZone } from '../src/host/time.ts'
@@ -342,6 +343,63 @@ describe('tolerant extraction', () => {
     assert.equal(titleFromEvents(events, 'fallback'), 'Real Title')
     assert.equal(titleFromEvents([events[0]!], 'fallback'), 'first question')
     assert.equal(titleFromEvents([], 'fallback'), 'fallback')
+  })
+})
+
+describe('editing a pending alarm', () => {
+  /** Add one pending alarm and hand back a callable tool. */
+  function armed(offsetMs: number): { service: ClockService; tool: { execute: (a: Record<string, unknown>, e: unknown) => Promise<unknown> } } {
+    const { controller } = recordingController()
+    const service = makeService(controller)
+    const now = Date.now()
+    service.store.add(createAlarm({ at: now + offsetMs, timeZone: 'UTC', keyword: 'first', sessionId: 'session-a', origin: 'user' }, now))
+    return { service, tool: buildTool(service) as never }
+  }
+
+  it('changes only the fields it is given', async () => {
+    const { service, tool } = armed(3600_000)
+    const id = service.store.all()[0]!.id
+    await tool.execute({ action: 'update', id, keyword: 'renamed' }, {})
+    const after = service.store.get(id)!
+    assert.equal(after.keyword, 'renamed')
+    assert.equal(after.sessionId, 'session-a', 'the target must survive a keyword-only edit')
+    assert.equal(after.status, 'pending')
+  })
+
+  it('treats an empty note as a clear and an absent note as untouched', async () => {
+    const { service, tool } = armed(3600_000)
+    const id = service.store.all()[0]!.id
+    await tool.execute({ action: 'update', id, note: 'keep me' }, {})
+    assert.equal(service.store.get(id)!.note, 'keep me')
+    await tool.execute({ action: 'update', id, keyword: 'again' }, {})
+    assert.equal(service.store.get(id)!.note, 'keep me', 'omitting note must not clear it')
+    await tool.execute({ action: 'update', id, note: '' }, {})
+    assert.equal(service.store.get(id)!.note, undefined, 'an empty note must clear it')
+  })
+
+  it('moves the instant with afterSeconds', async () => {
+    const { service, tool } = armed(1000)
+    const id = service.store.all()[0]!.id
+    const before = service.store.get(id)!.at
+    await tool.execute({ action: 'update', id, afterSeconds: 7200 }, {})
+    const after = service.store.get(id)!.at
+    assert.ok(after > before + 7000_000, 'the alarm must actually move later')
+  })
+
+  it('refuses an alarm that already fired, because editing it would promise a delivery', async () => {
+    const { service, tool } = armed(-60_000)
+    const id = service.store.all()[0]!.id
+    service.store.patch(id, { status: 'fired', firedAt: Date.now() })
+    await assert.rejects(
+      () => tool.execute({ action: 'update', id, keyword: 'too late' }, {}),
+      /only a pending alarm can be edited/,
+    )
+  })
+
+  it('refuses a call that changes nothing rather than reporting success', async () => {
+    const { service, tool } = armed(3600_000)
+    const id = service.store.all()[0]!.id
+    await assert.rejects(() => tool.execute({ action: 'update', id }, {}), /nothing to change/)
   })
 })
 

@@ -65,9 +65,9 @@ const PARAMETERS: Record<string, unknown> = {
   properties: {
     action: {
       type: 'string',
-      enum: ['now', 'set', 'list', 'cancel'],
+      enum: ['now', 'set', 'update', 'list', 'cancel'],
       description:
-        'now reads the current time. set creates a wake-up. list shows alarms. cancel removes pending ones.',
+        'now reads the current time. set creates a wake-up. update changes one that is still pending. list shows alarms. cancel removes pending ones.',
     },
     sessionId: {
       type: 'string',
@@ -180,7 +180,7 @@ export function buildTool(service: ClockService): Record<string, unknown> {
   return {
     name: TOOL_NAME,
     description:
-      'Schedule a wake-up: when a chosen instant passes, a message carrying a keyword is delivered into a conversation — by default this one, or another conversation by id. Use it to come back to work at a set time. A wake delivered late says so, including the scheduled time, the actual time, and the drift.',
+      'Schedule a wake-up: when a chosen instant passes, a message carrying a keyword is delivered into a conversation — by default this one, or another conversation by id. Use it to come back to work at a set time. update changes an alarm that has not fired yet; only its own fields change, and a new instant re-arms it. A wake delivered late says so, including the scheduled time, the actual time, and the drift.',
     parameters: PARAMETERS,
     output: {
       schema: OUTPUT_SCHEMA,
@@ -292,6 +292,45 @@ export function buildTool(service: ClockService): Record<string, unknown> {
           timeZone: service.timeZone,
           now: isoInZone(now, service.timeZone),
           alarms: [toRow(cancelled, now)],
+          notes,
+        }
+      }
+
+      if (action === 'update') {
+        const id = typeof args.id === 'string' ? args.id.trim() : ''
+        if (id === '') throw new Error('pass id, plus whichever fields should change')
+        const existing = service.store.get(id)
+        if (existing === undefined) throw new Error('no alarm with id ' + id)
+        if (existing.status !== 'pending') {
+          throw new Error('alarm ' + id + ' is ' + existing.status + '; only a pending alarm can be edited')
+        }
+        const patch: Partial<ClockAlarm> = {}
+        if (typeof args.afterSeconds === 'number' && Number.isFinite(args.afterSeconds)) {
+          patch.at = now + Math.round(args.afterSeconds * 1000)
+        } else if (typeof args.at === 'string' && args.at.trim() !== '') {
+          const parsed = Date.parse(args.at)
+          if (Number.isNaN(parsed)) {
+            throw new Error('at must be a parseable ISO-8601 instant with an explicit offset')
+          }
+          patch.at = parsed
+        }
+        if (typeof args.timeZone === 'string' && isValidTimeZone(args.timeZone)) patch.timeZone = args.timeZone
+        if (typeof args.keyword === 'string' && args.keyword.trim() !== '') patch.keyword = args.keyword.trim()
+        // An empty note clears it; an absent note leaves it alone.
+        if (typeof args.note === 'string') patch.note = args.note.trim() === '' ? undefined : args.note.trim()
+        if (typeof args.label === 'string') patch.label = args.label.trim() === '' ? undefined : args.label.trim()
+        if (typeof args.sessionId === 'string' && args.sessionId.trim() !== '') patch.sessionId = args.sessionId.trim()
+        if (Object.keys(patch).length === 0) throw new Error('nothing to change: pass at, afterSeconds, keyword, note, label or sessionId')
+        const updated = await service.update(id, patch)
+        if (updated === undefined) throw new Error('no alarm with id ' + id)
+        notes.push('A changed instant re-arms both trigger layers immediately.')
+        return {
+          action,
+          summary: 'Alarm ' + id + ' updated: ' + isoInZone(updated.at, updated.timeZone) + ' keyword "' + updated.keyword + '".',
+          sessionId: callingSession,
+          timeZone: updated.timeZone,
+          now: isoInZone(now, updated.timeZone),
+          alarms: [toRow(updated, now)],
           notes,
         }
       }

@@ -46,8 +46,9 @@ function AlarmRow(props: {
   onFire: (id: string) => void
   onCancel: (id: string) => void
   onForget: (id: string) => void
+  onEdit: (alarm: ClockAlarm) => void
 }): React.ReactElement {
-  const { alarm, now, onFire, onCancel, onForget } = props
+  const { alarm, now, onFire, onCancel, onForget, onEdit } = props
   const late = alarm.status === 'fired' && alarm.firedAt !== undefined && alarm.firedAt - alarm.at > 60000
   const rowClass =
     styles.alarm +
@@ -92,6 +93,13 @@ function AlarmRow(props: {
         alarm.status === 'pending'
           ? React.createElement('button', {
               className: styles.smallButton,
+              title: '改时间、关键词、内容或要唤醒的对话',
+              onClick: () => onEdit(alarm),
+            }, '编辑')
+          : null,
+        alarm.status === 'pending'
+          ? React.createElement('button', {
+              className: styles.smallButton,
               title: '取消这次唤醒，保留记录',
               onClick: () => onCancel(alarm.id),
             }, '取消')
@@ -122,6 +130,8 @@ export function ClockApp(): React.ReactElement {
   const [note, setNote] = useState('')
   const [sessionId, setSessionId] = useState('')
   const [busy, setBusy] = useState(false)
+  /** Alarm currently loaded into the form, or null when creating a new one. */
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [error, setError] = useState('')
 
   const zone = state === null ? browserZone() : state.timeZone
@@ -181,6 +191,34 @@ export function ClockApp(): React.ReactElement {
     return pending.length === 0 ? null : pending[0]!
   }, [alarms])
 
+  /**
+   * Load a pending alarm into the form.
+   *
+   * The day and time are rendered in the BROWSER zone, not the alarm's own,
+   * because the form reads them back through a browser-local Date. Rendering
+   * them in another zone would make opening an alarm and saving it unchanged
+   * silently move it.
+   * @param alarm - the alarm to edit.
+   */
+  const startEdit = useCallback((alarm: ClockAlarm) => {
+    const local = browserZone()
+    setEditingId(alarm.id)
+    setSelectedDay(formatDate(alarm.at, local))
+    setTime(formatHm(alarm.at, local))
+    setKeyword(alarm.keyword)
+    setNote(alarm.note ?? '')
+    setSessionId(alarm.sessionId)
+    setError('')
+  }, [])
+
+  /** Leave edit mode without touching the alarm. */
+  const cancelEdit = useCallback(() => {
+    setEditingId(null)
+    setKeyword('')
+    setNote('')
+    setError('')
+  }, [])
+
   const submit = useCallback(async () => {
     if (keyword.trim() === '') {
       setError('请填写关键词：唤醒消息用它开头')
@@ -193,16 +231,34 @@ export function ClockApp(): React.ReactElement {
     setBusy(true)
     try {
       const at = instantFromLocal(selectedDay, time)
-      await call('/alarms', {
-        at,
-        timeZone: browserZone(),
-        keyword: keyword.trim(),
-        note: note.trim() === '' ? undefined : note.trim(),
-        label: undefined,
-        sessionId,
-        sessionTitle: state === null ? undefined : (state.sessions.find((row) => row.id === sessionId)?.title ?? undefined),
-        origin: 'user',
-      })
+      const zone = browserZone()
+      const targetTitle =
+        state === null ? undefined : (state.sessions.find((row) => row.id === sessionId)?.title ?? undefined)
+      if (editingId === null) {
+        await call('/alarms', {
+          at,
+          timeZone: zone,
+          keyword: keyword.trim(),
+          note: note.trim() === '' ? undefined : note.trim(),
+          label: undefined,
+          sessionId,
+          sessionTitle: targetTitle,
+          origin: 'user',
+        })
+      } else {
+        // An empty note is sent as an empty string so the host can tell
+        // "clear it" from "leave it alone"; an absent key would mean the latter.
+        await call('/alarms/update', {
+          id: editingId,
+          at,
+          timeZone: zone,
+          keyword: keyword.trim(),
+          note: note.trim(),
+          sessionId,
+          sessionTitle: targetTitle ?? '',
+        })
+      }
+      setEditingId(null)
       setKeyword('')
       setNote('')
       setError('')
@@ -212,7 +268,7 @@ export function ClockApp(): React.ReactElement {
     } finally {
       setBusy(false)
     }
-  }, [keyword, note, selectedDay, sessionId, state, time, refresh])
+  }, [keyword, note, selectedDay, sessionId, state, time, refresh, editingId])
 
   const act = useCallback(
     async (path: string, id: string) => {
@@ -352,6 +408,7 @@ export function ClockApp(): React.ReactElement {
                   onFire: (id: string) => { void act('/alarms/fire', id) },
                   onCancel: (id: string) => { void act('/alarms/cancel', id) },
                   onForget: (id: string) => { void act('/alarms/forget', id) },
+                  onEdit: startEdit,
                 })),
           ),
         ),
@@ -370,6 +427,7 @@ export function ClockApp(): React.ReactElement {
                   onFire: (id: string) => { void act('/alarms/fire', id) },
                   onCancel: (id: string) => { void act('/alarms/cancel', id) },
                   onForget: (id: string) => { void act('/alarms/forget', id) },
+                  onEdit: startEdit,
                 })),
           ),
         ),
@@ -379,6 +437,11 @@ export function ClockApp(): React.ReactElement {
       // refresh button beside the create button, which squeezed the button until
       // its text was clipped.
       React.createElement('div', { className: styles.form },
+        editingId === null
+          ? null
+          : React.createElement('div', { className: styles.editingBanner },
+              '正在编辑待触发日程 · 保存后重新计算触发时间',
+            ),
         React.createElement('div', { className: styles.field },
           React.createElement('span', { className: styles.fieldLabel }, '唤醒日期与时间'),
           React.createElement('div', { className: styles.fieldRow },
@@ -433,7 +496,14 @@ export function ClockApp(): React.ReactElement {
           className: styles.button + ' ' + styles.buttonBlock,
           disabled: busy,
           onClick: () => { void submit() },
-        }, busy ? '创建中…' : '创建唤醒'),
+        }, busy ? '保存中…' : editingId === null ? '创建唤醒' : '保存修改'),
+        editingId === null
+          ? null
+          : React.createElement('button', {
+              className: styles.smallButton + ' ' + styles.buttonBlock,
+              style: { marginTop: '6px' },
+              onClick: cancelEdit,
+            }, '取消编辑'),
         state !== null && state.scheduler.systemScheduler
           ? React.createElement('div', { className: styles.hint },
               '系统计划任务：' +

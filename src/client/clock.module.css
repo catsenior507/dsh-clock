@@ -295,6 +295,16 @@
 /* The primary action owns its row, so its text always fits. */
 .buttonBlock { display: block; width: 100%; padding: 9px 12px; margin-top: 2px; }
 
+/* Says which alarm the form is currently pointed at. */
+.editingBanner {
+  margin-bottom: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+}
+
 /* Row actions: labelled and finger-sized rather than bare glyphs. */
 .smallButton, .smallButtonDanger {
   border: 1px solid var(--border);

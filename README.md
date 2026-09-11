@@ -64,8 +64,12 @@ Settings; it opens the panel.
 - The **clock** shows the current time, the zone, and a live countdown to the next wake.
 - The **calendar** marks every day that carries an alarm; click a day, type a time and a keyword, choose the
   conversation, and press the button. The button always says exactly what it will create.
-- Each row can be fired immediately, cancelled, or deleted. A fired row reports whether it was on time or late,
-  and any delivery error is shown on the row rather than swallowed.
+- The alarm list is split into **pending** and **settled**, each its own scroll window, so a long history cannot
+  stretch the panel. Pending rows sort soonest-first; settled rows sort most-recent-first.
+- Each row can be **edited**, fired immediately, cancelled, or deleted. Editing loads the alarm back into the
+  form — instant, keyword, content and target all stay changeable — and the button becomes **保存修改**. Only a
+  pending alarm can be edited: changing one that already fired would promise a delivery that is not going to
+  happen. A fired row reports whether it was on time or late, and any delivery error is shown on the row.
 
 ### From the agent
 
