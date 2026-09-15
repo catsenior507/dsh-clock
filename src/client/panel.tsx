@@ -282,6 +282,19 @@ export function ClockApp(): React.ReactElement {
     [refresh],
   )
 
+  /** Answer the branch question. The banner disappearing is the confirmation. */
+  const answerFork = useCallback(
+    async (path: string, forkSessionId: string) => {
+      try {
+        await call(path, { sessionId: forkSessionId })
+        await refresh()
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure))
+      }
+    },
+    [refresh],
+  )
+
   // Escape closes the panel. A pointer press outside it is deliberately not
   // bound: the trigger lives in the sidebar, and a dismissal racing the
   // trigger's own click would close the panel the instant it opened.
@@ -326,6 +339,33 @@ export function ClockApp(): React.ReactElement {
       // panel's max-height there was nothing left to scroll and the lower
       // fields simply fell off the bottom edge.
       React.createElement('div', { className: styles.body },
+        // Branching copies a conversation, not the alarm table. An alarm set
+        // before the branch keeps pointing at the parent, so the branch is
+        // silently never woken - which is the kind of failure nobody notices
+        // until the moment it matters. Ask, once, per branch.
+        state === null || state.forks.length === 0
+          ? null
+          : React.createElement('div', { className: styles.forkBanner },
+              state.forks.map((fork) =>
+                React.createElement('div', { key: fork.sessionId },
+                  React.createElement('div', null,
+                    '「' + fork.title + '」是从「' + fork.parentTitle + '」分支出来的，还有 ',
+                    String(fork.alarms),
+                    ' 条闹钟只指向原来那条对话 —— 那个分支不会被唤醒。',
+                  ),
+                  React.createElement('div', { className: styles.forkActions },
+                    React.createElement('button', {
+                      className: styles.smallButton,
+                      onClick: () => { void answerFork('/alarms/fork-copy', fork.sessionId) },
+                    }, '复制闹钟到这个分支'),
+                    React.createElement('button', {
+                      className: styles.smallButton,
+                      onClick: () => { void answerFork('/alarms/fork-dismiss', fork.sessionId) },
+                    }, '不用了'),
+                  ),
+                ),
+              ),
+            ),
       React.createElement('div', { className: styles.clock },
         React.createElement('div', { className: styles.clockTime }, formatTime(now, zone)),
         React.createElement('div', { className: styles.clockMeta },

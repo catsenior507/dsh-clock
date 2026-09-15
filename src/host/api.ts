@@ -178,6 +178,16 @@ export async function handle(
       const fired = await service.fireOne(requiredString(body, 'id'), 'manual' satisfies FireTrigger)
       return fired === undefined ? fail(404, 'no alarm with that id') : ok(fired)
     }
+    if (method === 'POST' && path === '/alarms/fork-copy') {
+      // Arm a branch with the alarms its parent still carries. Both keep one,
+      // which is the whole point: the branch would otherwise never be woken.
+      const copied = await service.copyAlarmsToFork(requiredString(body, 'sessionId'))
+      return ok({ copied })
+    }
+    if (method === 'POST' && path === '/alarms/fork-dismiss') {
+      service.dismissFork(requiredString(body, 'sessionId'))
+      return ok({ dismissed: true })
+    }
     if (method === 'POST' && path === '/client-log') {
       // The browser half writes here. The harness logger's output never reaches
       // anything a maintainer can read, and a client plugin that activates only

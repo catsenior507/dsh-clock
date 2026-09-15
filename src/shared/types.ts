@@ -49,6 +49,14 @@ export interface ClockAlarm {
   via?: FireTrigger
   /** Delivery failure, kept so a failed wake is visible instead of silent. */
   error?: string
+  /**
+   * The alarm this one was copied from, when a branch received a copy.
+   *
+   * It is what makes "this branch is already covered" answerable: comparing
+   * keyword and instant would call two deliberately identical alarms a copy,
+   * and copying again on every state read would multiply them.
+   */
+  copyOf?: string
 }
 
 /** Plugin configuration with defaults resolved. */
@@ -87,6 +95,26 @@ export interface ClockSessionView {
   updatedAt: number
   /** True when the conversation has no live session and must be resumed to wake. */
   cold: boolean
+  /** The conversation this one branched from, when it is a branch. */
+  parentSession?: string
+}
+
+/**
+ * A branch whose parent still carries pending alarms.
+ *
+ * Branching copies the conversation but not the alarm table, so an alarm set
+ * before the branch keeps pointing at the parent and the branch is never woken.
+ * This is the question the panel asks about that.
+ */
+export interface ClockForkPrompt {
+  /** The branch, which is not covered yet. */
+  sessionId: string
+  title: string
+  /** The conversation the alarms still point at. */
+  parentId: string
+  parentTitle: string
+  /** How many pending alarms would have to be copied. */
+  alarms: number
 }
 
 /** Everything the panel needs in one read. */
@@ -103,6 +131,8 @@ export interface ClockStateView {
     timerArmedFor: number | null
     lastSyncError?: string
   }
+  /** Branches of alarmed conversations that are not covered by a copy yet. */
+  forks: ClockForkPrompt[]
   /** What the background stored-title read did, so a title-less picker is diagnosable. */
   titleIndex: {
     snapshots: number

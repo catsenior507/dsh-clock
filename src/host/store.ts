@@ -121,6 +121,14 @@ export function createAlarm(input: AlarmInput, now: number): ClockAlarm {
 export class AlarmStore {
   private readonly file: string
   private alarms: ClockAlarm[] = []
+  /**
+   * Branches the user declined to copy alarms onto.
+   *
+   * Kept in the same file as the table on purpose: this is the difference
+   * between asking once and asking on every state read, and losing it on
+   * restart would turn a declined question into a recurring one.
+   */
+  private dismissed: string[] = []
   private loaded = false
 
   /** @param dataDir - directory holding `alarms.json`. */
@@ -141,6 +149,8 @@ export class AlarmStore {
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as unknown
       const rows = Array.isArray(parsed) ? parsed : (parsed as { alarms?: unknown }).alarms
+      const declined = (parsed as { dismissedForks?: unknown }).dismissedForks
+      if (Array.isArray(declined)) this.dismissed = declined.filter((id): id is string => typeof id === 'string')
       if (Array.isArray(rows)) {
         this.alarms = rows.filter((row): row is ClockAlarm => {
           const candidate = row as Partial<ClockAlarm>
@@ -216,6 +226,20 @@ export class AlarmStore {
     return dropped
   }
 
+  /** Whether the user already declined to copy alarms onto this branch. */
+  isForkDismissed(sessionId: string): boolean {
+    this.load()
+    return this.dismissed.includes(sessionId)
+  }
+
+  /** Remember that the user declined, so the question is asked once. */
+  dismissFork(sessionId: string): void {
+    this.load()
+    if (this.dismissed.includes(sessionId)) return
+    this.dismissed.push(sessionId)
+    this.persist()
+  }
+
   /** Replace the whole table, used by tests and by a full re-read. */
   replace(rows: ClockAlarm[]): void {
     this.alarms = rows
@@ -228,7 +252,11 @@ export class AlarmStore {
     const directory = dirname(this.file)
     mkdirSync(directory, { recursive: true })
     const temporary = this.file + '.tmp'
-    writeFileSync(temporary, JSON.stringify({ version: 1, alarms: this.alarms }, null, 2), 'utf8')
+    writeFileSync(
+      temporary,
+      JSON.stringify({ version: 1, alarms: this.alarms, dismissedForks: this.dismissed }, null, 2),
+      'utf8',
+    )
     renameSync(temporary, this.file)
   }
 

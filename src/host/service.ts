@@ -18,6 +18,7 @@ import type {
   AlarmOrigin,
   ClockAlarm,
   ClockConfig,
+  ClockForkPrompt,
   ClockSessionView,
   ClockStateView,
   FireTrigger,
@@ -151,6 +152,51 @@ export function titleFromEvents(events: readonly LogEventLike[], fallbackId: str
   if (firstUser === undefined) return fallbackId
   const text = firstText(firstUser.data).replace(/\s+/g, ' ').trim()
   return text === '' ? fallbackId : text.slice(0, 48)
+}
+
+/**
+ * Branches whose parent still carries pending alarms.
+ *
+ * Branching copies the conversation, not the alarm table: an alarm set before
+ * the branch keeps pointing at the parent, so the branch is silently never
+ * woken. That is the case worth interrupting a human for, and it is the only
+ * one this reports - a branch of a conversation with no pending alarms inherits
+ * nothing and has nothing to ask about.
+ *
+ * A branch is covered when every one of the parent's pending alarms has a copy
+ * already pointing at it, matched through `copyOf` rather than by comparing
+ * keyword and instant: two deliberately identical alarms are not a copy, and
+ * treating them as one would copy on every read.
+ * @param rows - the session rows, live and stored.
+ * @param store - the alarm table.
+ * @returns one prompt per uncovered branch.
+ */
+export function forkPrompts(rows: ClockSessionView[], store: AlarmStore): ClockForkPrompt[] {
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  const pending = store.pending()
+  const out: ClockForkPrompt[] = []
+  for (const row of rows) {
+    const parentId = row.parentSession
+    if (parentId === undefined || parentId === '') continue
+    // Subagent branches are filtered out of `rows` already; a branch of a
+    // conversation with nothing pending inherits nothing.
+    const inherited = pending.filter((alarm) => alarm.sessionId === parentId)
+    if (inherited.length === 0) continue
+    const covered = new Set(
+      pending.filter((alarm) => alarm.sessionId === row.id).map((alarm) => alarm.copyOf),
+    )
+    const missing = inherited.filter((alarm) => !covered.has(alarm.id)).length
+    if (missing === 0) continue
+    if (store.isForkDismissed(row.id)) continue
+    out.push({
+      sessionId: row.id,
+      title: row.title,
+      parentId,
+      parentTitle: byId.get(parentId)?.title ?? parentId,
+      alarms: missing,
+    })
+  }
+  return out
 }
 
 /**
@@ -408,6 +454,63 @@ export class ClockService implements SchedulerHost {
     return removed
   }
 
+  /**
+   * Copy a conversation's pending alarms onto a branch of it.
+   *
+   * Both conversations end up armed: the parent keeps the alarm it had, and the
+   * branch gets its own row pointing at itself. Each copy carries `copyOf`, so
+   * the branch counts as covered afterwards and the question is not asked again.
+   * A copy keeps the original instant, keyword, content, label and zone - the
+   * point is that the branch gets the same reminder, not a rescheduled one.
+   * @param sessionId - the branch to arm.
+   * @returns how many alarms were copied.
+   * @throws when the conversation is unknown or is not a branch.
+   */
+  async copyAlarmsToFork(sessionId: string): Promise<number> {
+    const rows = await this.listSessions()
+    const branch = rows.find((row) => row.id === sessionId)
+    if (branch === undefined) throw new Error('no conversation ' + sessionId)
+    const parentId = branch.parentSession
+    if (parentId === undefined || parentId === '') {
+      throw new Error('conversation ' + sessionId + ' did not branch from another one')
+    }
+    const pending = this.store.pending()
+    const covered = new Set(
+      pending.filter((alarm) => alarm.sessionId === sessionId).map((alarm) => alarm.copyOf),
+    )
+    const sources = pending.filter((alarm) => alarm.sessionId === parentId && !covered.has(alarm.id))
+    for (const source of sources) {
+      const copy = createAlarm(
+        {
+          at: source.at,
+          timeZone: source.timeZone,
+          keyword: source.keyword,
+          note: source.note,
+          label: source.label,
+          sessionId: branch.id,
+          sessionTitle: branch.title,
+          origin: 'user',
+        },
+        this.now(),
+      )
+      copy.copyOf = source.id
+      this.store.add(copy)
+    }
+    if (sources.length > 0) await this.scheduler.resync()
+    return sources.length
+  }
+
+  /**
+   * Remember that the user does not want this branch armed.
+   *
+   * Recorded rather than merely hidden in the panel, because the alternative is
+   * asking the same question on every state read until the alarm fires.
+   * @param sessionId - the branch to stop asking about.
+   */
+  dismissFork(sessionId: string): void {
+    this.store.dismissFork(sessionId)
+  }
+
   /** Resolve the session controller, preferring an injected test double. */
   private controller(): SessionControllerLike | undefined {
     if (this.injectedController !== undefined) return this.injectedController
@@ -442,6 +545,7 @@ export class ClockService implements SchedulerHost {
         createdAt: session.header?.createdAt ?? 0,
         updatedAt: last === undefined ? session.header?.createdAt ?? 0 : last.time,
         cold: false,
+        parentSession: session.header?.parentSession,
       })
     }
     const persistence = this.persistence()
@@ -460,6 +564,7 @@ export class ClockService implements SchedulerHost {
             createdAt,
             updatedAt: createdAt,
             cold: true,
+            parentSession: snapshot.header?.parentSession,
           })
         }
       } catch {
@@ -541,12 +646,16 @@ export class ClockService implements SchedulerHost {
 
   /** Everything the panel renders in one read. */
   async state(): Promise<ClockStateView> {
+    // One read of the session list, shared: listing twice would let the rows and
+    // the branch questions disagree about the same conversation.
+    const sessions = await this.listSessions()
     return {
       now: this.now(),
       timeZone: this.timeZone,
       alarms: this.store.all(),
-      sessions: await this.listSessions(),
+      sessions,
       scheduler: this.schedulerState,
+      forks: forkPrompts(sessions, this.store),
       titleIndex: { ...this.titleIndex },
       config: {
         port: this.config.port,

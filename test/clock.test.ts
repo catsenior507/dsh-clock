@@ -19,6 +19,7 @@ import { AlarmStore, createAlarm } from '../src/host/store.ts'
 import { ClockService, firstText, isSubagentSession, titleFromEvents } from '../src/host/service.ts'
 import { renderWakeText, type SessionControllerLike } from '../src/host/fire.ts'
 import { buildTool } from '../src/host/tool.ts'
+import { forkPrompts } from '../src/host/service.ts'
 import { corsHeaders, resolveRequestedAt } from '../src/host/api.ts'
 import { registerSkill, SKILL_BODY } from '../src/host/skill.ts'
 import { driftVerdict, durationText, isoInZone, dateKeyInZone, isValidTimeZone } from '../src/host/time.ts'
@@ -343,6 +344,102 @@ describe('tolerant extraction', () => {
     assert.equal(titleFromEvents(events, 'fallback'), 'Real Title')
     assert.equal(titleFromEvents([events[0]!], 'fallback'), 'first question')
     assert.equal(titleFromEvents([], 'fallback'), 'fallback')
+  })
+})
+
+describe('a conversation is branched while an alarm points at it', () => {
+  const parent = { id: 'session-parent', header: { id: 'session-parent', createdAt: 1 }, snapshotEvents: () => [] }
+  const branch = {
+    id: 'session-branch',
+    header: { id: 'session-branch', createdAt: 2, parentSession: 'session-parent' },
+    snapshotEvents: () => [],
+  }
+  const plain = { id: 'session-plain', header: { id: 'session-plain', createdAt: 3 }, snapshotEvents: () => [] }
+
+  /** A service whose only sessions are the given rows. */
+  function over(rows: unknown[], dataDir?: string): ClockService {
+    const { controller } = recordingController()
+    return new ClockService({
+      ctx: {
+        sessions: { list: () => rows, get: () => undefined },
+        get: () => undefined,
+        logger: { warn() {}, info() {} },
+      } as never,
+      config: config(dataDir === undefined ? {} : { dataDir }),
+      controller,
+    })
+  }
+
+  /** Put one pending alarm on the parent. */
+  function arm(service: ClockService): void {
+    const now = Date.now()
+    service.store.add(
+      createAlarm(
+        { at: now + 3600_000, timeZone: 'UTC', keyword: 'standup', note: 'call it', sessionId: 'session-parent', origin: 'user' },
+        now,
+      ),
+    )
+  }
+
+  it('asks about a branch whose parent still has a pending alarm', async () => {
+    const service = over([parent, branch, plain])
+    arm(service)
+    const forks = (await service.state()).forks
+    assert.equal(forks.length, 1)
+    assert.equal(forks[0]!.sessionId, 'session-branch')
+    assert.equal(forks[0]!.parentId, 'session-parent')
+    assert.equal(forks[0]!.alarms, 1)
+  })
+
+  it('says nothing when the parent has nothing pending', async () => {
+    const service = over([parent, branch])
+    assert.deepEqual((await service.state()).forks, [])
+  })
+
+  it('arms both conversations and does not ask again', async () => {
+    const service = over([parent, branch])
+    arm(service)
+    assert.equal(await service.copyAlarmsToFork('session-branch'), 1)
+    const pending = service.store.pending()
+    assert.equal(pending.length, 2, 'the parent keeps its alarm and the branch gains one')
+    assert.deepEqual(pending.map((a) => a.sessionId).sort(), ['session-branch', 'session-parent'])
+    const copy = pending.find((a) => a.sessionId === 'session-branch')!
+    assert.equal(copy.keyword, 'standup', 'a copy is the same reminder, not a new one')
+    assert.equal(copy.note, 'call it')
+    assert.equal(copy.at, pending.find((a) => a.sessionId === 'session-parent')!.at)
+    assert.deepEqual((await service.state()).forks, [], 'an armed branch must stop being asked about')
+  })
+
+  it('remembers a declined branch on disk, so it is asked once', async () => {
+    const dir = tempDir()
+    const first = over([parent, branch], dir)
+    arm(first)
+    assert.equal((await first.state()).forks.length, 1)
+    first.dismissFork('session-branch')
+    assert.deepEqual((await first.state()).forks, [])
+    const second = over([parent, branch], dir)
+    assert.deepEqual((await second.state()).forks, [], 'a restart must not resurrect the question')
+  })
+
+  it('refuses to arm a conversation that never branched', async () => {
+    const service = over([parent, plain])
+    await assert.rejects(() => service.copyAlarmsToFork('session-plain'), /did not branch/)
+    await assert.rejects(() => service.copyAlarmsToFork('session-nope'), /no conversation/)
+  })
+
+  it('treats an identical-looking alarm as its own, not as a copy', () => {
+    // Two deliberately identical alarms are two alarms; matching them by
+    // keyword and instant would mark the branch covered and never ask.
+    const service = over([parent, branch])
+    arm(service)
+    const source = service.store.pending()[0]!
+    // The spread is the point: same instant, same keyword, no copyOf.
+    service.store.add({ ...source, id: 'other', sessionId: 'session-branch' })
+    const rows = [
+      { id: 'session-parent', title: 'parent', cold: false, createdAt: 1, updatedAt: 1 },
+      { id: 'session-branch', title: 'branch', cold: false, createdAt: 2, updatedAt: 2, parentSession: 'session-parent' },
+    ]
+    assert.equal(forkPrompts(rows, service.store).length, 1)
   })
 })
 

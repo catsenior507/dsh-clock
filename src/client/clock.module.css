@@ -309,6 +309,18 @@
 /* The primary action owns its row, so its text always fits. */
 .buttonBlock { display: block; width: 100%; padding: 9px 12px; margin-top: 2px; }
 
+/* The branch question: one block per uncovered branch, above the alarm board. */
+.forkBanner {
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(226, 176, 74, 0.12);
+  color: var(--text);
+  font-size: 12px;
+}
+.forkActions { display: flex; gap: 6px; margin-top: 7px; }
+
 /* Says which alarm the form is currently pointed at. */
 .editingBanner {
   margin-bottom: 8px;

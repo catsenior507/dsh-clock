@@ -66,6 +66,9 @@ Settings; it opens the panel.
   conversation, and press the button. The button always says exactly what it will create.
 - The alarm list is split into **pending** and **settled**, each its own scroll window, so a long history cannot
   stretch the panel. Pending rows sort soonest-first; settled rows sort most-recent-first.
+- **Branching is noticed.** Branching a conversation copies the conversation, not the alarm table, so an
+  alarm set before the branch would keep pointing at the parent and the branch would never be woken. The
+  panel asks once per uncovered branch - copy the alarms onto it, or decline; either answer is remembered.
 - Each row can be **edited**, fired immediately, cancelled, or deleted. Editing loads the alarm back into the
   form — instant, keyword, content and target all stay changeable — and the button becomes **保存修改**. Only a
   pending alarm can be edited: changing one that already fired would promise a delivery that is not going to
