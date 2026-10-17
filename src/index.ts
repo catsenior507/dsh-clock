@@ -43,7 +43,6 @@ import { ClockService, type PluginContext } from './host/service.ts'
 import { registerWebRoute, startStandaloneServer, type WebServerLike } from './host/api.ts'
 import { registerTool, type ToolRegistryLike } from './host/tool.ts'
 import { registerSkill, type SkillRegistryLike } from './host/skill.ts'
-import { systemSchedulerSupported } from './host/system-scheduler.ts'
 
 /** Cordis plugin name. */
 export const name = 'clock'
@@ -115,9 +114,7 @@ export function apply(ctx: PluginContext, config?: Partial<ClockConfig>): void {
   if (controller === undefined) {
     ctx.logger?.warn('[clock] sessionController unavailable: alarms can be created and listed, but waking is disabled')
   }
-  if (service.config.useSystemScheduler && !systemSchedulerSupported()) {
-    ctx.logger?.info?.('[clock] OS scheduler mirror unavailable on this platform; using the in-process timer only')
-  }
+  // There is no OS scheduler mirror any more: the harness owns the timer and the delivery.
 
   const api = mountApi(ctx, service)
   const tool = service.config.exposeTool ? mountTool(ctx, service) : 'disabled'
@@ -134,8 +131,7 @@ export function apply(ctx: PluginContext, config?: Partial<ClockConfig>): void {
       api +
       ' skill=' +
       skill +
-      ' systemScheduler=' +
-      String(service.config.useSystemScheduler && systemSchedulerSupported()),
+      ' delivery=harness',
   )
 }
 

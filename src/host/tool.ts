@@ -239,6 +239,9 @@ export function buildTool(service: ClockService): Record<string, unknown> {
           sessionId: target,
           origin: 'agent',
         })
+        if (alarm === undefined) {
+          throw new Error('the schedule service is not available in this profile')
+        }
         if (target !== callingSession) {
           notes.push('This alarm wakes a different conversation (' + target + '); it will be resumed if it is closed.')
         }
@@ -254,7 +257,7 @@ export function buildTool(service: ClockService): Record<string, unknown> {
       }
 
       if (action === 'list') {
-        const rows = service.store.all().map((alarm) => toRow(alarm, now))
+        const rows = (await service.listAlarms()).map((alarm) => toRow(alarm, now))
         return {
           action,
           summary: rows.length === 0 ? 'No alarms.' : String(rows.length) + ' alarm(s).',
@@ -269,8 +272,10 @@ export function buildTool(service: ClockService): Record<string, unknown> {
       if (action === 'cancel') {
         if (args.all === true) {
           if (callingSession === '') throw new Error('cannot cancel all without a calling conversation')
-          const mine = service.store.pending().filter((alarm) => alarm.sessionId === callingSession)
-          for (const alarm of mine) await service.cancel(alarm.id)
+          const mine = (await service.listAlarms()).filter(
+            (alarm) => alarm.status === 'pending' && alarm.sessionId === callingSession,
+          )
+          for (const alarm of mine) await service.forget(alarm.id)
           return {
             action,
             summary: 'Cancelled ' + String(mine.length) + ' pending alarm(s) for this conversation.',
@@ -283,8 +288,10 @@ export function buildTool(service: ClockService): Record<string, unknown> {
         }
         const id = typeof args.id === 'string' ? args.id.trim() : ''
         if (id === '') throw new Error('pass id, or all: true')
-        const cancelled = await service.cancel(id)
-        if (cancelled === undefined) throw new Error('no alarm with id ' + id)
+        const found = (await service.listAlarms()).find((row) => row.id === id)
+        if (found === undefined) throw new Error('no alarm with id ' + id)
+        await service.forget(id)
+        const cancelled = { ...found, status: 'cancelled' as const }
         return {
           action,
           summary: 'Cancelled alarm ' + id + '.',
@@ -299,7 +306,7 @@ export function buildTool(service: ClockService): Record<string, unknown> {
       if (action === 'update') {
         const id = typeof args.id === 'string' ? args.id.trim() : ''
         if (id === '') throw new Error('pass id, plus whichever fields should change')
-        const existing = service.store.get(id)
+        const existing = (await service.listAlarms()).find((row) => row.id === id)
         if (existing === undefined) throw new Error('no alarm with id ' + id)
         if (existing.status !== 'pending') {
           throw new Error('alarm ' + id + ' is ' + existing.status + '; only a pending alarm can be edited')

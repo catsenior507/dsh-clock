@@ -1,0 +1,544 @@
+/**
+ * The clock plugin's service, backed by the harness schedule service.
+ *
+ * dsh 0.2.x ships `ctx.schedule`: durable records, host-side delivery, a UI and
+ * a model-facing tool. This plugin grew its own alarm store, its own delivery
+ * engine and a PowerShell task mirror before any of that existed. Two delivery
+ * paths for one reminder is how a reminder fires twice, or not at all, so the
+ * engine is gone and the records are the harness's.
+ *
+ * What remains here is the part the harness has no opinion about: which
+ * conversations exist, what they are called, and how the panel words a wake.
+ *
+ * @module dsh-clock/host/service
+ */
+
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import type {
+  AlarmOrigin,
+  ClockAlarm,
+  ClockConfig,
+  ClockForkPrompt,
+  ClockSessionView,
+  ClockStateView,
+  FireTrigger,
+} from '../shared/types.ts'
+import { resolveConfig } from './store.ts'
+import { toClockAlarm } from './officialStore.ts'
+import { processTimeZone } from './time.ts'
+
+/** The slice of a live session this file reads. */
+export interface SessionLike {
+  readonly id: string
+  readonly header?: {
+    readonly cwd?: string
+    readonly createdAt?: number
+    readonly parentSession?: string
+    readonly origin?: string
+  }
+  snapshotEvents?(): readonly unknown[]
+}
+
+/** The live session store. */
+export interface SessionStoreLike {
+  list(): SessionLike[]
+  get(id: string): SessionLike | undefined
+}
+
+/** One event as the log stores it. */
+interface LogEventLike {
+  readonly type?: string
+  readonly time?: number
+  readonly data?: unknown
+}
+
+/** A stored conversation, as persistence reports it. */
+interface PersistenceSnapshotLike {
+  readonly header?: {
+    readonly id?: string
+    readonly cwd?: string
+    readonly createdAt?: number
+    readonly parentSession?: string
+    readonly origin?: string
+  }
+}
+
+/** One open stored log. */
+export interface PersistenceHandleLike {
+  read(): Promise<{ events?: unknown[] }>
+  close?(): Promise<void>
+}
+
+/** The stored-session service. */
+export interface SessionPersistenceLike {
+  list(signal?: AbortSignal): Promise<PersistenceSnapshotLike[]>
+  open(sessionId: string, mode: 'read'): Promise<PersistenceHandleLike>
+}
+
+/** The slice of the schedule service this file reads. */
+export interface ScheduleLike {
+  list(request: Record<string, unknown>): Promise<unknown[]>
+  create(sessionId: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  update(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  delete(request: Record<string, unknown>): Promise<unknown>
+}
+
+/** The context this plugin needs. */
+export interface HostContextLike {
+  readonly sessions?: SessionStoreLike
+  get?(name: string): unknown
+  logger?: { warn(message: string): void }
+}
+
+/** The plugin context shape. */
+export interface PluginContext extends HostContextLike {
+  readonly sessions?: SessionStoreLike
+}
+
+/** Wiring options. */
+export interface ClockServiceDeps {
+  ctx: PluginContext
+  config?: Partial<ClockConfig>
+}
+
+/** Turn a snapshot accessor's result into typed events. */
+function normalizeEvents(raw: readonly unknown[] | undefined): LogEventLike[] {
+  const events: LogEventLike[] = []
+  for (const item of raw ?? []) {
+    if (item === null || typeof item !== 'object') continue
+    const candidate = item as { type?: unknown; time?: unknown; data?: unknown }
+    events.push({
+      type: typeof candidate.type === 'string' ? candidate.type : undefined,
+      time: typeof candidate.time === 'number' ? candidate.time : 0,
+      data: candidate.data,
+    })
+  }
+  return events
+}
+
+/**
+ * Find the first usable text inside an unknown payload.
+ *
+ * Deliberately schema-tolerant: this plugin must keep working across harness
+ * versions whose message-part shapes it cannot import, and a picker row with no
+ * preview is a far smaller failure than a thrown one.
+ * @param value - payload to walk.
+ * @param depth - recursion guard.
+ * @returns the text, or an empty string.
+ */
+export function firstText(value: unknown, depth = 0): string {
+  if (depth > 4) return ''
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = firstText(item, depth + 1)
+      if (found !== '') return found
+    }
+    return ''
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (typeof record.text === 'string' && record.text.trim() !== '') return record.text
+    for (const key of ['content', 'parts', 'message', 'data']) {
+      const found = firstText(record[key], depth + 1)
+      if (found !== '') return found
+    }
+  }
+  return ''
+}
+
+/** Newest `session/title` in a log, or the first user message, or the id. */
+export function titleFromEvents(events: readonly LogEventLike[], fallbackId: string): string {
+  let title = ''
+  for (const event of events) {
+    if (event.type !== 'session/title') continue
+    const value = (event.data as { title?: unknown } | null)?.title
+    if (typeof value === 'string' && value.trim() !== '') title = value.trim()
+  }
+  if (title !== '') return title
+  const firstUser = events.find((event) => {
+    if (event.type !== 'user/message') return false
+    const source = (event.data as { source?: { kind?: string } } | null)?.source
+    return source?.kind === 'user'
+  })
+  if (firstUser === undefined) return fallbackId
+  const text = firstText(firstUser.data).replace(/\s+/g, ' ').trim()
+  return text === '' ? fallbackId : text.slice(0, 48)
+}
+
+/**
+ * Branches whose parent still carries pending alarms.
+ *
+ * Branching copies the conversation, not the alarm table: an alarm set before
+ * the branch keeps pointing at the parent, so the branch is silently never
+ * woken. That is the case worth interrupting a human for.
+ * @param rows - the conversation picker rows.
+ * @param alarms - the alarms currently in force.
+ * @param dismissed - branches the human already waved away.
+ * @returns the branches to ask about.
+ */
+export function forkPrompts(
+  rows: ClockSessionView[],
+  alarms: ClockAlarm[],
+  dismissed: ReadonlySet<string> = new Set(),
+): ClockForkPrompt[] {
+  const pending = alarms.filter((alarm) => alarm.status === 'pending')
+  if (pending.length === 0) return []
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  const out: ClockForkPrompt[] = []
+  for (const row of rows) {
+    const parentId = row.parentSession
+    if (parentId === undefined || parentId === '' || dismissed.has(row.id)) continue
+    const parent = byId.get(parentId)
+    if (parent === undefined) continue
+    const inherited = pending.filter((alarm) => alarm.sessionId === parentId)
+    if (inherited.length === 0) continue
+    const covered = pending.some((alarm) => alarm.sessionId === row.id)
+    if (covered) continue
+    out.push({ sessionId: row.id, parentSessionId: parentId, parentTitle: parent.title, count: inherited.length })
+  }
+  return out
+}
+
+/** Whether a session is a subagent's, which the picker must not offer. */
+export function isSubagentSession(header: { origin?: string } | undefined): boolean {
+  return header?.origin === 'subagent'
+}
+
+/** The service. */
+export class ClockService {
+  readonly config
+  private readonly ctx: PluginContext
+  private started = false
+  private readonly storedTitles = new Map<string, string>()
+  private readonly titleIndex = {
+    snapshots: 0, attempted: 0, titled: 0, failed: 0, rawEvents: -1, sampleEventKeys: '', lastError: '',
+  }
+  private indexing = false
+  private readonly dismissedForks = new Set<string>()
+
+  /** @param deps - context and optional configuration. */
+  constructor(deps: ClockServiceDeps) {
+    this.ctx = deps.ctx
+    this.config = resolveConfig(deps.config)
+  }
+
+  /**
+   * Append one line to the plugin's startup log.
+   * @param message - the line to record.
+   */
+  note(message: string): void {
+    try {
+      mkdirSync(this.config.dataDir, { recursive: true })
+      appendFileSync(join(this.config.dataDir, 'startup.log'), new Date().toISOString() + ' ' + message + '\n')
+    } catch {
+      // Diagnostics must never be the thing that stops the plugin loading.
+    }
+  }
+
+  /** Diagnostics sink that tolerates a context without a logger. */
+  log(message: string): void {
+    try {
+      this.ctx.logger?.warn('[clock] ' + message)
+    } catch {
+      // Logging must never be the thing that breaks a wake.
+    }
+  }
+
+  /** Current instant. */
+  now(): number {
+    return Date.now()
+  }
+
+  /** The display zone: configured, else the process zone. */
+  get timeZone(): string {
+    return this.config.defaultTimeZone === '' ? processTimeZone() : this.config.defaultTimeZone
+  }
+
+  /** The schedule service, when the composition provides one. */
+  private schedule(): ScheduleLike | undefined {
+    return this.ctx.get?.('schedule') as ScheduleLike | undefined
+  }
+
+  /**
+   * Every alarm in force, read from the official records.
+   * @returns the alarms, soonest first.
+   */
+  async listAlarms(): Promise<ClockAlarm[]> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return []
+    try {
+      const records = await schedule.list({})
+      const now = this.now()
+      const zone = this.timeZone
+      return records
+        .map((record) => toClockAlarm(record as never, now, zone) as unknown as ClockAlarm)
+        .sort((left, right) => left.at - right.at)
+    } catch (error) {
+      this.log('schedule.list failed: ' + String(error))
+      return []
+    }
+  }
+
+  /** Start the background title read. Alarms need no arming: the harness owns them. */
+  start(): void {
+    if (this.started) return
+    this.started = true
+    void this.refreshStoredTitles()
+  }
+
+  /** The conversation's session store, when resolvable. */
+  private persistence(): SessionPersistenceLike | undefined {
+    return this.ctx.get?.('sessionPersistence') as SessionPersistenceLike | undefined
+  }
+
+  /**
+   * Live and stored conversations, newest first.
+   * @returns picker rows.
+   */
+  async listSessions(): Promise<ClockSessionView[]> {
+    const rows: ClockSessionView[] = []
+    const known = new Set<string>()
+    for (const session of this.ctx.sessions?.list() ?? []) {
+      if (isSubagentSession(session.header)) continue
+      const events = session.snapshotEvents === undefined ? [] : normalizeEvents(session.snapshotEvents())
+      const last = events[events.length - 1]
+      known.add(session.id)
+      rows.push({
+        id: session.id,
+        title: titleFromEvents(events, session.id),
+        cwd: session.header?.cwd,
+        createdAt: session.header?.createdAt ?? 0,
+        updatedAt: last === undefined ? session.header?.createdAt ?? 0 : last.time,
+        cold: false,
+        parentSession: session.header?.parentSession,
+      })
+    }
+    const persistence = this.persistence()
+    if (persistence !== undefined) {
+      try {
+        for (const snapshot of await persistence.list()) {
+          if (isSubagentSession(snapshot.header)) continue
+          const id = snapshot.header?.id
+          if (typeof id !== 'string' || id === '' || known.has(id)) continue
+          known.add(id)
+          const createdAt = snapshot.header?.createdAt ?? 0
+          rows.push({
+            id,
+            title: this.storedTitles.get(id) ?? id,
+            cwd: snapshot.header?.cwd,
+            createdAt,
+            updatedAt: createdAt,
+            cold: true,
+            parentSession: snapshot.header?.parentSession,
+          })
+        }
+      } catch {
+        // A broken stored list must not take the live list down with it.
+      }
+    }
+    if (rows.some((row) => row.cold && row.title === row.id)) void this.refreshStoredTitles()
+    return rows.sort((left, right) => right.updatedAt - left.updatedAt)
+  }
+
+  /**
+   * Read stored conversation titles once, in the background.
+   *
+   * A persistence snapshot carries only a header, so a cold conversation has no
+   * title until its log is opened. Opening every log on the request path would
+   * make the picker slow, so this runs once and is purely additive: rows are
+   * usable by id before it finishes.
+   */
+  async refreshStoredTitles(): Promise<void> {
+    if (this.indexing) return
+    const persistence = this.persistence()
+    if (persistence === undefined) {
+      this.titleIndex.lastError = 'sessionPersistence not resolvable yet'
+      return
+    }
+    this.indexing = true
+    try {
+      const snapshots = await persistence.list()
+      this.titleIndex.snapshots = snapshots.length
+      for (const snapshot of snapshots) {
+        const id = snapshot.header?.id
+        if (typeof id !== 'string' || id === '' || this.storedTitles.has(id)) continue
+        this.titleIndex.attempted += 1
+        let handle: PersistenceHandleLike | undefined
+        try {
+          handle = await persistence.open(id, 'read')
+          const inspection = await handle.read()
+          const raw = inspection.events ?? []
+          if (this.titleIndex.rawEvents < 0) {
+            this.titleIndex.rawEvents = raw.length
+            const first = raw[0]
+            this.titleIndex.sampleEventKeys =
+              first === undefined || first === null || typeof first !== 'object'
+                ? '(first entry is ' + String(first) + ')'
+                : Object.keys(first as Record<string, unknown>).join(',')
+          }
+          const events = normalizeEvents(raw)
+          const title = titleFromEvents(events, id)
+          this.storedTitles.set(id, title)
+          if (title !== id) this.titleIndex.titled += 1
+        } catch (error) {
+          this.titleIndex.failed += 1
+          this.titleIndex.lastError = String(error).slice(0, 200)
+          this.storedTitles.set(id, id)
+        } finally {
+          try { await handle?.close?.() } catch { /* releasing a read handle is best effort */ }
+        }
+      }
+    } catch {
+      // The picker simply keeps showing ids.
+    } finally {
+      this.indexing = false
+    }
+  }
+
+  /**
+   * Create one alarm through the official service.
+   * @param input - what the panel collected.
+   * @returns the created alarm.
+   */
+  async create(input: {
+    at: number
+    timeZone: string
+    keyword: string
+    note?: string
+    sessionId: string
+    sessionTitle?: string
+    label?: string
+    origin?: AlarmOrigin
+  }): Promise<ClockAlarm | undefined> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return undefined
+    const title = (input.label ?? input.keyword).trim() === '' ? 'reminder' : (input.label ?? input.keyword).trim().slice(0, 120)
+    const prompt = (input.note ?? '').trim() === '' ? input.keyword : (input.note ?? '')
+    const created = await schedule.create(input.sessionId, {
+      title,
+      prompt,
+      at: new Date(input.at).toISOString(),
+    })
+    const now = this.now()
+    return toClockAlarm(created as never, now, this.timeZone) as unknown as ClockAlarm
+  }
+
+  /**
+   * Move a pending alarm to a new instant.
+   * @param id - alarm identity.
+   * @param at - the new instant.
+   * @returns the updated alarm, or undefined when it is gone.
+   */
+  async update(id: string, at: number): Promise<ClockAlarm | undefined> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return undefined
+    try {
+      await schedule.update({ id, at: new Date(at).toISOString() })
+    } catch (error) {
+      this.log('schedule.update failed: ' + String(error))
+      return undefined
+    }
+    return (await this.listAlarms()).find((alarm) => alarm.id === id)
+  }
+
+  /**
+   * Drop an alarm entirely. The official service has no "cancelled but visible"
+   * state, so cancelling is deleting; the row is gone after the next read.
+   * @param id - alarm identity.
+   * @returns whether a record was removed.
+   */
+  async forget(id: string): Promise<boolean> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return false
+    try {
+      await schedule.delete({ id })
+      return true
+    } catch (error) {
+      this.log('schedule.delete failed: ' + String(error))
+      return false
+    }
+  }
+
+  /** Forget a branch question until the next restart. */
+  dismissFork(sessionId: string): void {
+    this.dismissedForks.add(sessionId)
+  }
+
+  /**
+   * Copy a conversation's pending alarms onto a branch of it.
+   *
+   * The official record binds one session, so a branch inherits nothing; each
+   * pending alarm is re-created against the branch with the same instant and
+   * wording. Coverage is judged by "the branch already has an alarm at this
+   * instant with this title", which is weaker than the identity the old store
+   * carried and is stated here rather than hidden.
+   * @param sessionId - the branch to arm.
+   * @returns how many alarms were copied.
+   * @throws when the conversation is unknown or did not branch.
+   */
+  async copyAlarmsToFork(sessionId: string): Promise<number> {
+    const rows = await this.listSessions()
+    const branch = rows.find((row) => row.id === sessionId)
+    if (branch === undefined) throw new Error('no conversation ' + sessionId)
+    const parentId = branch.parentSession
+    if (parentId === undefined || parentId === '') {
+      throw new Error('conversation ' + sessionId + ' did not branch from another one')
+    }
+    const alarms = await this.listAlarms()
+    const parentPending = alarms.filter((alarm) => alarm.status === 'pending' && alarm.sessionId === parentId)
+    const branchPending = alarms.filter((alarm) => alarm.status === 'pending' && alarm.sessionId === sessionId)
+    let copied = 0
+    for (const alarm of parentPending) {
+      const covered = branchPending.some((row) => row.at === alarm.at && row.keyword === alarm.keyword)
+      if (covered) continue
+      const created = await this.create({
+        at: alarm.at,
+        timeZone: alarm.timeZone,
+        keyword: alarm.keyword,
+        note: alarm.note,
+        sessionId,
+        label: alarm.label,
+      })
+      if (created !== undefined) copied += 1
+    }
+    return copied
+  }
+
+  /** Everything the panel renders in one read. */
+  async state(): Promise<ClockStateView> {
+    const sessions = await this.listSessions()
+    const alarms = await this.listAlarms()
+    const now = this.now()
+    const nextDue = alarms
+      .filter((alarm) => alarm.status === 'pending')
+      .reduce<number | null>((soonest, alarm) => (soonest === null || alarm.at < soonest ? alarm.at : soonest), null)
+    return {
+      now,
+      timeZone: this.timeZone,
+      alarms,
+      sessions,
+      scheduler: {
+        // There is no OS-level mirror any more: the harness delivers. The field
+        // stays in the shape so the panel keeps compiling, and it says the truth.
+        systemScheduler: false,
+        systemTaskArmedFor: null,
+        timerArmedFor: nextDue,
+      },
+      forks: forkPrompts(sessions, alarms, this.dismissedForks),
+      titleIndex: { ...this.titleIndex },
+      config: {
+        port: this.config.port,
+        dataDir: this.config.dataDir,
+        defaultTimeZone: this.timeZone,
+        wakeMode: this.config.wakeMode,
+      },
+    }
+  }
+
+  /** Nothing to release: the harness owns the timers. */
+  async dispose(): Promise<void> {
+    // The plugin used to own a timer and an OS task; both belong to the harness now.
+  }
+}

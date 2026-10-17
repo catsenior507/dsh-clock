@@ -1,13 +1,14 @@
 /**
- * Host-half orchestration: the alarm table, the three trigger layers, the wake
- * path, and the reads the panel and the agent tool both use.
+ * The clock plugin's service, backed by the harness schedule service.
  *
- * The host half duck-types every harness service it touches. An external dsh
- * plugin resolves only \`@deepseek-ai/cordis\` plus its own dependencies —
- * \`dsh-session\`, \`dsh-tools\` and friends are not reachable from a linked
- * package — so importing their types would silently inline a second copy of a
- * runtime contract. The interfaces below restate exactly the surface this
- * plugin uses, and every optional one degrades instead of failing.
+ * dsh 0.2.x ships `ctx.schedule`: durable records, host-side delivery, a UI and
+ * a model-facing tool. This plugin grew its own alarm store, its own delivery
+ * engine and a PowerShell task mirror before any of that existed. Two delivery
+ * paths for one reminder is how a reminder fires twice, or not at all, so the
+ * engine is gone and the records are the harness's.
+ *
+ * What remains here is the part the harness has no opinion about: which
+ * conversations exist, what they are called, and how the panel words a wake.
  *
  * @module dsh-clock/host/service
  */
@@ -22,81 +23,95 @@ import type {
   ClockSessionView,
   ClockStateView,
   FireTrigger,
-  ResolvedConfig,
 } from '../shared/types.ts'
-import { AlarmStore, createAlarm, resolveConfig, type AlarmInput } from './store.ts'
-import { ClockScheduler, type SchedulerHost } from './scheduler.ts'
-import { deliverWake, type SessionControllerLike } from './fire.ts'
-import { syncSystemTask as syncOsTask, systemSchedulerSupported } from './system-scheduler.ts'
+import { resolveConfig } from './store.ts'
+import { toClockAlarm } from './officialStore.ts'
 import { processTimeZone } from './time.ts'
 
-/** A session event as this plugin reads it. */
-interface LogEventLike {
-  type: string
-  time: number
-  data: unknown
-}
-
-/** The subset of a live Session this plugin reads. */
+/** The slice of a live session this file reads. */
 export interface SessionLike {
   readonly id: string
   readonly header?: {
-    readonly id?: string
-    readonly createdAt?: number
     readonly cwd?: string
+    readonly createdAt?: number
     readonly parentSession?: string
-    /** Present and equal to 'subagent' on a conversation owned by subagent routing. */
     readonly origin?: string
   }
-  snapshotEvents?(): unknown[]
+  snapshotEvents?(): readonly unknown[]
 }
 
-/** The subset of ctx.sessions this plugin uses. */
+/** The live session store. */
 export interface SessionStoreLike {
   list(): SessionLike[]
   get(id: string): SessionLike | undefined
 }
 
-/** One persisted-session snapshot, header-only. */
+/** One event as the log stores it. */
+interface LogEventLike {
+  readonly type?: string
+  readonly time?: number
+  readonly data?: unknown
+}
+
+/** A stored conversation, as persistence reports it. */
 interface PersistenceSnapshotLike {
-  header?: { id?: string; createdAt?: number; cwd?: string; parentSession?: string; origin?: string }
-  sizeBytes?: number
+  readonly header?: {
+    readonly id?: string
+    readonly cwd?: string
+    readonly createdAt?: number
+    readonly parentSession?: string
+    readonly origin?: string
+  }
 }
 
-/** A read handle over one stored session log. */
-interface PersistenceHandleLike {
+/** One open stored log. */
+export interface PersistenceHandleLike {
   read(): Promise<{ events?: unknown[] }>
-  close?(): Promise<void> | void
+  close?(): Promise<void>
 }
 
-/** The subset of ctx.sessionPersistence this plugin uses. */
+/** The stored-session service. */
 export interface SessionPersistenceLike {
   list(signal?: AbortSignal): Promise<PersistenceSnapshotLike[]>
   open(sessionId: string, mode: 'read'): Promise<PersistenceHandleLike>
 }
 
-/** A cordis-style context, narrowed to what this plugin calls. */
+/** The slice of the schedule service this file reads. */
+export interface ScheduleLike {
+  list(request: Record<string, unknown>): Promise<unknown[]>
+  create(sessionId: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  update(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  delete(request: Record<string, unknown>): Promise<unknown>
+}
+
+/** The context this plugin needs. */
 export interface HostContextLike {
-  on?(name: string, listener: (...args: unknown[]) => void): unknown
-  effect?(callback: () => (() => void) | void, name?: string): unknown
+  readonly sessions?: SessionStoreLike
   get?(name: string): unknown
+  /** Cordis lifecycle hook; present on a real plugin context, absent in tests. */
+  effect?(callback: () => (() => void) | void, label?: string): void
+  logger?: { warn(message: string): void; info?(message: string): void }
 }
 
-/** Everything the plugin reaches for on the cordis context. */
+/** The plugin context shape. */
 export interface PluginContext extends HostContextLike {
-  sessions?: SessionStoreLike
-  logger?: { warn(message: string): void; info(message: string): void }
+  readonly sessions?: SessionStoreLike
 }
 
-/** Normalize whatever a session hands back into shaped events. */
-function normalizeEvents(raw: unknown[]): LogEventLike[] {
+/** Wiring options. */
+export interface ClockServiceDeps {
+  ctx: PluginContext
+  config?: Partial<ClockConfig>
+}
+
+/** Turn a snapshot accessor's result into typed events. */
+function normalizeEvents(raw: readonly unknown[] | undefined): LogEventLike[] {
   const events: LogEventLike[] = []
-  for (const item of raw) {
+  for (const item of raw ?? []) {
     if (item === null || typeof item !== 'object') continue
     const candidate = item as { type?: unknown; time?: unknown; data?: unknown }
-    if (typeof candidate.type !== 'string') continue
     events.push({
-      type: candidate.type,
+      type: typeof candidate.type === 'string' ? candidate.type : undefined,
       time: typeof candidate.time === 'number' ? candidate.time : 0,
       data: candidate.data,
     })
@@ -159,133 +174,66 @@ export function titleFromEvents(events: readonly LogEventLike[], fallbackId: str
  *
  * Branching copies the conversation, not the alarm table: an alarm set before
  * the branch keeps pointing at the parent, so the branch is silently never
- * woken. That is the case worth interrupting a human for, and it is the only
- * one this reports - a branch of a conversation with no pending alarms inherits
- * nothing and has nothing to ask about.
- *
- * A branch is covered when every one of the parent's pending alarms has a copy
- * already pointing at it, matched through `copyOf` rather than by comparing
- * keyword and instant: two deliberately identical alarms are not a copy, and
- * treating them as one would copy on every read.
- * @param rows - the session rows, live and stored.
- * @param store - the alarm table.
- * @returns one prompt per uncovered branch.
+ * woken. That is the case worth interrupting a human for.
+ * @param rows - the conversation picker rows.
+ * @param alarms - the alarms currently in force.
+ * @param dismissed - branches the human already waved away.
+ * @returns the branches to ask about.
  */
-export function forkPrompts(rows: ClockSessionView[], store: AlarmStore): ClockForkPrompt[] {
+export function forkPrompts(
+  rows: ClockSessionView[],
+  alarms: ClockAlarm[],
+  dismissed: ReadonlySet<string> = new Set(),
+): ClockForkPrompt[] {
+  const pending = alarms.filter((alarm) => alarm.status === 'pending')
+  if (pending.length === 0) return []
   const byId = new Map(rows.map((row) => [row.id, row]))
-  const pending = store.pending()
   const out: ClockForkPrompt[] = []
   for (const row of rows) {
     const parentId = row.parentSession
-    if (parentId === undefined || parentId === '') continue
-    // Subagent branches are filtered out of `rows` already; a branch of a
-    // conversation with nothing pending inherits nothing.
+    if (parentId === undefined || parentId === '' || dismissed.has(row.id)) continue
+    const parent = byId.get(parentId)
+    if (parent === undefined) continue
     const inherited = pending.filter((alarm) => alarm.sessionId === parentId)
     if (inherited.length === 0) continue
-    const covered = new Set(
-      pending.filter((alarm) => alarm.sessionId === row.id).map((alarm) => alarm.copyOf),
-    )
-    const missing = inherited.filter((alarm) => !covered.has(alarm.id)).length
-    if (missing === 0) continue
-    if (store.isForkDismissed(row.id)) continue
-    out.push({
-      sessionId: row.id,
-      title: row.title,
-      parentId,
-      parentTitle: byId.get(parentId)?.title ?? parentId,
-      alarms: missing,
-    })
+    const covered = pending.some((alarm) => alarm.sessionId === row.id)
+    if (covered) continue
+    out.push({ sessionId: row.id, title: row.title, parentId, parentTitle: parent.title, alarms: inherited.length })
   }
   return out
 }
 
-/**
- * Whether a conversation belongs to subagent routing.
- *
- * This matters because such a session can never be woken: the session
- * controller rejects an identity whose lifecycle belongs to subagent routing
- * (its own `ApiSessionSubagentOwnership`), so offering one in the picker would
- * be offering a target that is guaranteed to fail.
- *
- * Only `origin` is consulted. Subagent headers also carry a `delegationDepth`,
- * but a depth field is exactly the kind of thing a future version might start
- * writing on every session, and a check that silently emptied the picker would
- * be far worse than one that occasionally shows an extra row.
- * @param header - a live session header or a persistence snapshot header.
- * @returns whether the session is a subagent's.
- */
+/** Whether a session is a subagent's, which the picker must not offer. */
 export function isSubagentSession(header: { origin?: string } | undefined): boolean {
   return header?.origin === 'subagent'
 }
 
-/** Loaded plugin configuration with the data directory resolved. */
-export interface ClockServiceDeps {
-  ctx: PluginContext
-  config?: Partial<ClockConfig>
-  /** Injected for tests: bypasses the cordis lookup of the session controller. */
-  controller?: SessionControllerLike
-}
-
-/**
- * The plugin's host service.
- *
- * Three trigger layers converge on {@link fireDue}, and every one of them goes
- * through {@link claimDue} first, which flips an alarm to `fired` *before* any
- * delivery starts. That single ordering rule is what makes the layers safe to
- * stack: whichever arrives first wins, and the others find nothing to claim.
- */
-export class ClockService implements SchedulerHost {
-  readonly store: AlarmStore
-  readonly config: ResolvedConfig
+/** The service. */
+export class ClockService {
+  readonly config
   private readonly ctx: PluginContext
-  private readonly scheduler: ClockScheduler
-  private readonly injectedController: SessionControllerLike | undefined
-  private systemTaskArmedFor: number | null = null
-  private lastSyncError: string | undefined
   private started = false
-  /** Cached titles for stored conversations, filled in the background. */
   private readonly storedTitles = new Map<string, string>()
-  /**
-   * What the background title read actually did.
-   *
-   * A cold conversation whose log cannot be read simply falls back to showing
-   * its id, which is indistinguishable from "this conversation has no title".
-   * These counters are what makes the difference visible from outside.
-   */
   private readonly titleIndex = {
-    snapshots: 0,
-    attempted: 0,
-    titled: 0,
-    failed: 0,
-    rawEvents: -1,
-    sampleEventKeys: '',
-    lastError: '',
+    snapshots: 0, attempted: 0, titled: 0, failed: 0, rawEvents: -1, sampleEventKeys: '', lastError: '',
   }
   private indexing = false
+  private readonly dismissedForks = new Set<string>()
 
-  /** @param deps - context, optional configuration, optional test doubles. */
+  /** @param deps - context and optional configuration. */
   constructor(deps: ClockServiceDeps) {
     this.ctx = deps.ctx
     this.config = resolveConfig(deps.config)
-    this.store = new AlarmStore(this.config.dataDir)
-    this.scheduler = new ClockScheduler(this)
-    this.injectedController = deps.controller
-    this.store.load()
   }
 
   /**
    * Append one line to the plugin's startup log.
-   *
-   * The harness logger's output does not reach the host's captured stdout, so a
-   * plugin that activates only partly leaves no trace anywhere a maintainer can
-   * read. This is that trace: which optional services resolved, and whether the
-   * HTTP carrier and the agent tool actually mounted.
    * @param message - the line to record.
    */
   note(message: string): void {
     try {
       mkdirSync(this.config.dataDir, { recursive: true })
-      appendFileSync(join(this.config.dataDir, 'startup.log'), new Date().toISOString() + ' ' + message + '\n', 'utf8')
+      appendFileSync(join(this.config.dataDir, 'startup.log'), new Date().toISOString() + ' ' + message + '\n')
     } catch {
       // Diagnostics must never be the thing that stops the plugin loading.
     }
@@ -310,224 +258,45 @@ export class ClockService implements SchedulerHost {
     return this.config.defaultTimeZone === '' ? processTimeZone() : this.config.defaultTimeZone
   }
 
+  /** The schedule service, when the composition provides one. */
+  private schedule(): ScheduleLike | undefined {
+    return this.ctx.get?.('schedule') as ScheduleLike | undefined
+  }
+
   /**
-   * Start all three layers.
-   *
-   * The overdue replay runs first and on purpose: an alarm whose instant passed
-   * while the host was down is exactly the case the injected clock information
-   * exists for, and delivering it at startup is the only way it is ever
-   * delivered.
+   * Every alarm in force, read from the official records.
+   * @returns the alarms, soonest first.
    */
+  async listAlarms(): Promise<ClockAlarm[]> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return []
+    try {
+      const records = await schedule.list({})
+      const now = this.now()
+      const zone = this.timeZone
+      return records
+        .map((record) => toClockAlarm(record as never, now, zone) as unknown as ClockAlarm)
+        .sort((left, right) => left.at - right.at)
+    } catch (error) {
+      this.log('schedule.list failed: ' + String(error))
+      return []
+    }
+  }
+
+  /** Start the background title read. Alarms need no arming: the harness owns them. */
   start(): void {
     if (this.started) return
     this.started = true
-    try {
-      this.store.prune(this.now(), this.config.retainFiredDays)
-    } catch (error) {
-      this.log('prune failed: ' + String(error))
-    }
-    void this.replayAndArm()
     void this.refreshStoredTitles()
   }
 
-  /** Deliver anything already overdue, then arm both layers. */
-  private async replayAndArm(): Promise<void> {
-    try {
-      const claimed = await this.fireDue('overdue-replay')
-      if (claimed > 0) this.log('delivered ' + String(claimed) + ' overdue alarm(s) at startup')
-    } catch (error) {
-      this.log('overdue replay failed: ' + String(error))
-    }
-    await this.scheduler.resync()
-  }
-
-  /** Instant of the soonest pending alarm. */
-  earliestPending(): number | null {
-    const pending = this.store.pending()
-    return pending.length === 0 ? null : pending[0]!.at
-  }
-
-  /** Mirror the soonest pending instant into the OS scheduler. */
-  async syncSystemTask(at: number | null): Promise<string | null> {
-    if (!this.config.useSystemScheduler || !systemSchedulerSupported()) {
-      this.systemTaskArmedFor = null
-      return null
-    }
-    const error = syncOsTask(at, this.config.port, this.config.wakeComputer)
-    this.lastSyncError = error ?? undefined
-    this.systemTaskArmedFor = error === null ? at : null
-    return error
-  }
-
-  /** Snapshot of what the scheduler is currently doing, for the panel. */
-  get schedulerState(): { systemScheduler: boolean; systemTaskArmedFor: number | null; timerArmedFor: number | null; lastSyncError?: string } {
-    return {
-      systemScheduler: this.config.useSystemScheduler && systemSchedulerSupported(),
-      systemTaskArmedFor: this.systemTaskArmedFor,
-      timerArmedFor: this.scheduler.armedFor,
-      lastSyncError: this.lastSyncError,
-    }
-  }
-
-  /**
-   * Claim everything due as of now, flipping each alarm out of `pending`.
-   * @param trigger - which layer is claiming.
-   * @returns the alarms this caller now owns.
-   */
-  claimDue(trigger: FireTrigger): ClockAlarm[] {
-    const now = this.now()
-    const due = this.store.pending().filter((alarm) => alarm.at <= now)
-    for (const alarm of due) {
-      this.store.patch(alarm.id, { status: 'fired', firedAt: now, via: trigger })
-    }
-    return due
-  }
-
-  /** Deliver one already-claimed alarm and record the outcome. */
-  async deliver(alarm: ClockAlarm, trigger: FireTrigger): Promise<void> {
-    const controller = this.controller()
-    if (controller === undefined) {
-      this.store.patch(alarm.id, { error: 'sessionController is not available in this profile' })
-      return
-    }
-    const result = await deliverWake(controller, alarm, this.now(), this.config, trigger)
-    if (result.ok) {
-      this.store.patch(alarm.id, { deliveredText: result.text, error: undefined })
-    } else {
-      this.store.patch(alarm.id, { error: result.error })
-      this.log('wake failed for ' + alarm.id + ': ' + result.error)
-    }
-  }
-
-  /** Claim and deliver everything due, awaited. */
-  async fireDue(trigger: FireTrigger): Promise<number> {
-    const due = this.claimDue(trigger)
-    if (due.length === 0) return 0
-    await Promise.allSettled(due.map((alarm) => this.deliver(alarm, trigger)))
-    await this.scheduler.resync()
-    return due.length
-  }
-
-  /**
-   * Fire one named alarm now, regardless of its instant.
-   * @param id - alarm identity.
-   * @param trigger - how it was triggered.
-   * @returns the alarm, or undefined when it does not exist.
-   */
-  async fireOne(id: string, trigger: FireTrigger): Promise<ClockAlarm | undefined> {
-    const alarm = this.store.get(id)
-    if (alarm === undefined) return undefined
-    this.store.patch(id, { status: 'fired', firedAt: this.now(), via: trigger, error: undefined })
-    await this.deliver(this.store.get(id)!, trigger)
-    await this.scheduler.resync()
-    return this.store.get(id)
-  }
-
-  /** Create one alarm and re-arm. */
-  async create(input: AlarmInput): Promise<ClockAlarm> {
-    const alarm = createAlarm(input, this.now())
-    this.store.add(alarm)
-    await this.scheduler.resync()
-    return alarm
-  }
-
-  /** Replace the instant, keyword, note, or target of a pending alarm. */
-  async update(id: string, patch: Partial<ClockAlarm>): Promise<ClockAlarm | undefined> {
-    const alarm = this.store.patch(id, patch)
-    if (alarm !== undefined) await this.scheduler.resync()
-    return alarm
-  }
-
-  /** Cancel a pending alarm, keeping it visible as a cancelled row. */
-  async cancel(id: string): Promise<ClockAlarm | undefined> {
-    const alarm = this.store.get(id)
-    if (alarm === undefined) return undefined
-    const updated = this.store.patch(id, { status: 'cancelled' })
-    await this.scheduler.resync()
-    return updated
-  }
-
-  /** Drop an alarm entirely. */
-  async forget(id: string): Promise<boolean> {
-    const removed = this.store.remove(id)
-    if (removed) await this.scheduler.resync()
-    return removed
-  }
-
-  /**
-   * Copy a conversation's pending alarms onto a branch of it.
-   *
-   * Both conversations end up armed: the parent keeps the alarm it had, and the
-   * branch gets its own row pointing at itself. Each copy carries `copyOf`, so
-   * the branch counts as covered afterwards and the question is not asked again.
-   * A copy keeps the original instant, keyword, content, label and zone - the
-   * point is that the branch gets the same reminder, not a rescheduled one.
-   * @param sessionId - the branch to arm.
-   * @returns how many alarms were copied.
-   * @throws when the conversation is unknown or is not a branch.
-   */
-  async copyAlarmsToFork(sessionId: string): Promise<number> {
-    const rows = await this.listSessions()
-    const branch = rows.find((row) => row.id === sessionId)
-    if (branch === undefined) throw new Error('no conversation ' + sessionId)
-    const parentId = branch.parentSession
-    if (parentId === undefined || parentId === '') {
-      throw new Error('conversation ' + sessionId + ' did not branch from another one')
-    }
-    const pending = this.store.pending()
-    const covered = new Set(
-      pending.filter((alarm) => alarm.sessionId === sessionId).map((alarm) => alarm.copyOf),
-    )
-    const sources = pending.filter((alarm) => alarm.sessionId === parentId && !covered.has(alarm.id))
-    for (const source of sources) {
-      const copy = createAlarm(
-        {
-          at: source.at,
-          timeZone: source.timeZone,
-          keyword: source.keyword,
-          note: source.note,
-          label: source.label,
-          sessionId: branch.id,
-          sessionTitle: branch.title,
-          origin: 'user',
-        },
-        this.now(),
-      )
-      copy.copyOf = source.id
-      this.store.add(copy)
-    }
-    if (sources.length > 0) await this.scheduler.resync()
-    return sources.length
-  }
-
-  /**
-   * Remember that the user does not want this branch armed.
-   *
-   * Recorded rather than merely hidden in the panel, because the alternative is
-   * asking the same question on every state read until the alarm fires.
-   * @param sessionId - the branch to stop asking about.
-   */
-  dismissFork(sessionId: string): void {
-    this.store.dismissFork(sessionId)
-  }
-
-  /** Resolve the session controller, preferring an injected test double. */
-  private controller(): SessionControllerLike | undefined {
-    if (this.injectedController !== undefined) return this.injectedController
-    const service = this.ctx.get?.('sessionController') as SessionControllerLike | undefined
-    return service === undefined ? undefined : service
-  }
-
+  /** The conversation's session store, when resolvable. */
   private persistence(): SessionPersistenceLike | undefined {
     return this.ctx.get?.('sessionPersistence') as SessionPersistenceLike | undefined
   }
 
   /**
    * Live and stored conversations, newest first.
-   *
-   * The stored half is the point: an alarm exists to reach a conversation that
-   * may be closed, and the live store only contains sessions somebody has
-   * opened in this host generation.
    * @returns picker rows.
    */
   async listSessions(): Promise<ClockSessionView[]> {
@@ -543,7 +312,7 @@ export class ClockService implements SchedulerHost {
         title: titleFromEvents(events, session.id),
         cwd: session.header?.cwd,
         createdAt: session.header?.createdAt ?? 0,
-        updatedAt: last === undefined ? session.header?.createdAt ?? 0 : last.time,
+        updatedAt: last === undefined ? session.header?.createdAt ?? 0 : last.time ?? 0,
         cold: false,
         parentSession: session.header?.parentSession,
       })
@@ -571,9 +340,6 @@ export class ClockService implements SchedulerHost {
         // A broken stored list must not take the live list down with it.
       }
     }
-    // Kick the title read from the read path as well as from start(). The start
-    // attempt can run before persistence is resolvable, and this call is the
-    // moment a human is actually waiting for the titles.
     if (rows.some((row) => row.cold && row.title === row.id)) void this.refreshStoredTitles()
     return rows.sort((left, right) => right.updatedAt - left.updatedAt)
   }
@@ -583,20 +349,13 @@ export class ClockService implements SchedulerHost {
    *
    * A persistence snapshot carries only a header, so a cold conversation has no
    * title until its log is opened. Opening every log on the request path would
-   * make the picker slow and would hold read handles while the panel is open, so
-   * this runs once after start, writes each title as it lands, and is purely
-   * additive: rows are usable (by id) before it finishes.
+   * make the picker slow, so this runs once and is purely additive: rows are
+   * usable by id before it finishes.
    */
   async refreshStoredTitles(): Promise<void> {
     if (this.indexing) return
     const persistence = this.persistence()
     if (persistence === undefined) {
-      // Not a failure, a timing fact: this runs from start(), and at that point
-      // the persistence service is not resolvable from this plugin's context
-      // yet. Returning here without recording anything is what made every
-      // stored row show its id forever - the read was simply never attempted.
-      // listSessions() re-invokes this once the panel opens, by which time the
-      // service is up, so the index does get built.
       this.titleIndex.lastError = 'sessionPersistence not resolvable yet'
       return
     }
@@ -630,11 +389,7 @@ export class ClockService implements SchedulerHost {
           this.titleIndex.lastError = String(error).slice(0, 200)
           this.storedTitles.set(id, id)
         } finally {
-          try {
-            await handle?.close?.()
-          } catch {
-            // Releasing a read handle is best effort.
-          }
+          try { await handle?.close?.() } catch { /* releasing a read handle is best effort */ }
         }
       }
     } catch {
@@ -644,18 +399,143 @@ export class ClockService implements SchedulerHost {
     }
   }
 
+  /**
+   * Create one alarm through the official service.
+   * @param input - what the panel collected.
+   * @returns the created alarm.
+   */
+  async create(input: {
+    at: number
+    timeZone: string
+    keyword: string
+    note?: string
+    sessionId: string
+    sessionTitle?: string
+    label?: string
+    origin?: AlarmOrigin
+  }): Promise<ClockAlarm | undefined> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return undefined
+    const title = (input.label ?? input.keyword).trim() === '' ? 'reminder' : (input.label ?? input.keyword).trim().slice(0, 120)
+    const prompt = (input.note ?? '').trim() === '' ? input.keyword : (input.note ?? '')
+    const created = await schedule.create(input.sessionId, {
+      title,
+      prompt,
+      at: new Date(input.at).toISOString(),
+    })
+    const now = this.now()
+    return toClockAlarm(created as never, now, this.timeZone) as unknown as ClockAlarm
+  }
+
+  /**
+   * Move a pending alarm to a new instant.
+   * @param id - alarm identity.
+   * @param at - the new instant.
+   * @returns the updated alarm, or undefined when it is gone.
+   */
+  async update(
+    id: string,
+    patch: { at?: number; keyword?: string; note?: string },
+  ): Promise<ClockAlarm | undefined> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return undefined
+    const request: Record<string, unknown> = { id }
+    if (patch.at !== undefined) request.at = new Date(patch.at).toISOString()
+    if (patch.keyword !== undefined) request.title = patch.keyword
+    if (patch.note !== undefined) request.prompt = patch.note
+    try {
+      await schedule.update(request)
+    } catch (error) {
+      this.log('schedule.update failed: ' + String(error))
+      return undefined
+    }
+    return (await this.listAlarms()).find((alarm) => alarm.id === id)
+  }
+
+  /**
+   * Drop an alarm entirely. The official service has no "cancelled but visible"
+   * state, so cancelling is deleting; the row is gone after the next read.
+   * @param id - alarm identity.
+   * @returns whether a record was removed.
+   */
+  async forget(id: string): Promise<boolean> {
+    const schedule = this.schedule()
+    if (schedule === undefined) return false
+    try {
+      await schedule.delete({ id })
+      return true
+    } catch (error) {
+      this.log('schedule.delete failed: ' + String(error))
+      return false
+    }
+  }
+
+  /** Forget a branch question until the next restart. */
+  dismissFork(sessionId: string): void {
+    this.dismissedForks.add(sessionId)
+  }
+
+  /**
+   * Copy a conversation's pending alarms onto a branch of it.
+   *
+   * The official record binds one session, so a branch inherits nothing; each
+   * pending alarm is re-created against the branch with the same instant and
+   * wording. Coverage is judged by "the branch already has an alarm at this
+   * instant with this title", which is weaker than the identity the old store
+   * carried and is stated here rather than hidden.
+   * @param sessionId - the branch to arm.
+   * @returns how many alarms were copied.
+   * @throws when the conversation is unknown or did not branch.
+   */
+  async copyAlarmsToFork(sessionId: string): Promise<number> {
+    const rows = await this.listSessions()
+    const branch = rows.find((row) => row.id === sessionId)
+    if (branch === undefined) throw new Error('no conversation ' + sessionId)
+    const parentId = branch.parentSession
+    if (parentId === undefined || parentId === '') {
+      throw new Error('conversation ' + sessionId + ' did not branch from another one')
+    }
+    const alarms = await this.listAlarms()
+    const parentPending = alarms.filter((alarm) => alarm.status === 'pending' && alarm.sessionId === parentId)
+    const branchPending = alarms.filter((alarm) => alarm.status === 'pending' && alarm.sessionId === sessionId)
+    let copied = 0
+    for (const alarm of parentPending) {
+      const covered = branchPending.some((row) => row.at === alarm.at && row.keyword === alarm.keyword)
+      if (covered) continue
+      const created = await this.create({
+        at: alarm.at,
+        timeZone: alarm.timeZone,
+        keyword: alarm.keyword,
+        note: alarm.note,
+        sessionId,
+        label: alarm.label,
+      })
+      if (created !== undefined) copied += 1
+    }
+    return copied
+  }
+
   /** Everything the panel renders in one read. */
   async state(): Promise<ClockStateView> {
-    // One read of the session list, shared: listing twice would let the rows and
-    // the branch questions disagree about the same conversation.
     const sessions = await this.listSessions()
+    const alarms = await this.listAlarms()
+    const now = this.now()
+    const nextDue = alarms
+      .filter((alarm) => alarm.status === 'pending')
+      .reduce<number | null>((soonest, alarm) => (soonest === null || alarm.at < soonest ? alarm.at : soonest), null)
     return {
-      now: this.now(),
+      now,
       timeZone: this.timeZone,
-      alarms: this.store.all(),
+      alarms,
       sessions,
-      scheduler: this.schedulerState,
-      forks: forkPrompts(sessions, this.store),
+      scheduler: {
+        // There is no OS-level mirror any more: the harness delivers. The field
+        // stays in the shape so the panel keeps compiling, and it says the truth.
+        systemScheduler: false,
+        systemTaskArmedFor: null,
+        timerArmedFor: nextDue,
+      },
+      forks: forkPrompts(sessions, alarms, this.dismissedForks),
       titleIndex: { ...this.titleIndex },
       config: {
         port: this.config.port,
@@ -666,15 +546,8 @@ export class ClockService implements SchedulerHost {
     }
   }
 
-  /** Stop the scheduler and release the OS task. */
+  /** Nothing to release: the harness owns the timers. */
   async dispose(): Promise<void> {
-    this.scheduler.dispose()
-    if (this.config.useSystemScheduler && systemSchedulerSupported()) {
-      await this.syncSystemTask(null)
-    }
+    // The plugin used to own a timer and an OS task; both belong to the harness now.
   }
 }
-
-/** Re-exported so the plugin entry can build one without importing the store module. */
-export { resolveConfig }
-export type { AlarmOrigin }

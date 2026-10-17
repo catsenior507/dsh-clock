@@ -167,16 +167,20 @@ export async function handle(
       return updated === undefined ? fail(404, 'no alarm with id ' + id) : ok(updated)
     }
     if (method === 'POST' && path === '/alarms/cancel') {
-      const updated = await service.cancel(requiredString(body, 'id'))
-      return updated === undefined ? fail(404, 'no alarm with that id') : ok(updated)
+      // The official service has no "cancelled but visible" state, so cancelling
+      // is deleting. The panel gets a 404 for an id that is already gone, which
+      // is the same answer it would have given a moment later anyway.
+      const removed = await service.forget(requiredString(body, 'id'))
+      return removed ? ok({ id: requiredString(body, 'id'), status: 'cancelled' }) : fail(404, 'no alarm with that id')
     }
     if (method === 'POST' && path === '/alarms/forget') {
       const removed = await service.forget(requiredString(body, 'id'))
       return removed ? ok({ removed: true }) : fail(404, 'no alarm with that id')
     }
     if (method === 'POST' && path === '/alarms/fire') {
-      const fired = await service.fireOne(requiredString(body, 'id'), 'manual' satisfies FireTrigger)
-      return fired === undefined ? fail(404, 'no alarm with that id') : ok(fired)
+      // Delivery belongs to the harness now. Firing on demand would mean a second
+      // delivery path beside the official one, which is how a reminder fires twice.
+      return fail(501, 'manual firing is not offered: the harness delivers alarms')
     }
     if (method === 'POST' && path === '/alarms/fork-copy') {
       // Arm a branch with the alarms its parent still carries. Both keep one,
@@ -197,16 +201,9 @@ export async function handle(
       return ok({ recorded: message !== '' })
     }
     if (method === 'POST' && path === '/tick') {
-      // The OS scheduler's ping. It is answered immediately and the delivery
-      // continues in the background: a scheduled task should not be held open
-      // for the length of a model turn, and a failure is recorded on the alarm.
-      const claimed = service.claimDue('system-scheduler')
-      if (claimed.length > 0) {
-        void Promise.allSettled(claimed.map((alarm) => service.deliver(alarm, 'system-scheduler'))).then(() =>
-          service.schedulerState,
-        )
-      }
-      return ok({ claimed: claimed.length, ids: claimed.map((alarm) => alarm.id) })
+      // The OS task used to ping here. There is no OS task any more: the harness
+      // owns the timer and the delivery, so there is nothing to tick.
+      return fail(501, 'the harness schedules alarms; this plugin no longer owns a timer')
     }
     return fail(404, 'no such endpoint: ' + method + ' ' + path)
   } catch (error) {
