@@ -78,7 +78,10 @@ export interface SessionPersistenceLike {
 
 /** The slice of the schedule service this file reads. */
 export interface ScheduleLike {
-  list(request: Record<string, unknown>): Promise<unknown[]>
+  /** Every schedule across every session, each carrying its session binding. */
+  catalog(): Promise<unknown[]>
+  /** One session's schedules. Requires the session: the request type has no "all". */
+  list(request: { sessionId: string }): Promise<unknown[]>
   create(sessionId: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   update(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   delete(request: Record<string, unknown>): Promise<unknown>
@@ -219,6 +222,8 @@ export class ClockService {
   }
   private indexing = false
   private readonly dismissedForks = new Set<string>()
+  /** Why the last catalogue read failed, surfaced through state(). */
+  private lastListError: string | undefined
 
   /** @param deps - context and optional configuration. */
   constructor(deps: ClockServiceDeps) {
@@ -269,16 +274,26 @@ export class ClockService {
    */
   async listAlarms(): Promise<ClockAlarm[]> {
     const schedule = this.schedule()
-    if (schedule === undefined) return []
+    if (schedule === undefined) {
+      this.lastListError = 'the schedule service is not available in this profile'
+      return []
+    }
     try {
-      const records = await schedule.list({})
+      // catalog(), not list(): list requires one sessionId and has no "all".
+      // The first version called list({}) and caught the rejection, so the panel
+      // showed an empty pending list while a schedule existed and then fired.
+      const records = await schedule.catalog()
+      this.lastListError = undefined
       const now = this.now()
       const zone = this.timeZone
       return records
         .map((record) => toClockAlarm(record as never, now, zone) as unknown as ClockAlarm)
         .sort((left, right) => left.at - right.at)
     } catch (error) {
-      this.log('schedule.list failed: ' + String(error))
+      // Never swallow this: an empty list is indistinguishable from "nothing is
+      // scheduled", and that confusion is exactly what cost a round here.
+      this.lastListError = String(error).slice(0, 300)
+      this.log('schedule.catalog failed: ' + this.lastListError)
       return []
     }
   }
@@ -534,6 +549,9 @@ export class ClockService {
         systemScheduler: false,
         systemTaskArmedFor: null,
         timerArmedFor: nextDue,
+        ...(this.lastListError === undefined
+          ? {}
+          : { lastSyncError: 'catalogue read failed: ' + this.lastListError }),
       },
       forks: forkPrompts(sessions, alarms, this.dismissedForks),
       titleIndex: { ...this.titleIndex },

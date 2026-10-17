@@ -10,7 +10,11 @@ function fakeSchedule(records: unknown[]) {
   const calls = { created: [] as unknown[], updated: [] as unknown[], deleted: [] as unknown[] }
   return {
     calls,
-    list: async () => records,
+    // Deliberately broken: list() requires one sessionId and there is no "all".
+    // If the service ever goes back to calling it, the alarms vanish and the test
+    // below says so instead of quietly passing on an empty list.
+    list: async () => { throw new Error('list() needs one sessionId') },
+    catalog: async () => records,
     create: async (sessionId: string, request: Record<string, unknown>) => {
       calls.created.push({ sessionId, request })
       return { id: 'new-1', title: request.title, prompt: request.prompt, scheduledAt: request.at, state: 'scheduled', sessionId }
@@ -70,13 +74,22 @@ test('state reads alarms from the schedule service', async () => {
   assert.equal(state.alarms[0]?.keyword, 'wake')
   assert.equal(state.alarms[0]?.sessionId, 's1')
   assert.equal(state.scheduler.timerArmedFor, Date.parse('2026-10-18T10:05:00.000Z'), 'next due is reported from the records')
+  assert.equal(state.scheduler.lastSyncError, undefined, 'a working catalogue read reports no error')
   assert.equal(state.scheduler.systemScheduler, false, 'there is no OS mirror any more, and the field says so')
 })
 
-test('a missing schedule service yields no alarms rather than throwing', async () => {
+test('a missing schedule service yields no alarms rather than throwing, and says why', async () => {
   const state = await serviceWith(undefined).state()
   assert.deepEqual(state.alarms, [])
   assert.equal(state.scheduler.timerArmedFor, null)
+  assert.match(String(state.scheduler.lastSyncError), /schedule service is not available/)
+})
+
+test('a catalogue failure is reported, not disguised as an empty list', async () => {
+  const broken = { ...fakeSchedule([]), catalog: async () => { throw new Error('boom') } }
+  const state = await serviceWith(broken).state()
+  assert.deepEqual(state.alarms, [])
+  assert.match(String(state.scheduler.lastSyncError), /boom/, 'the panel can tell failure from emptiness')
 })
 
 test('create goes through the official service with title, prompt and an ISO instant', async () => {
