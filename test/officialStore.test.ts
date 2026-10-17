@@ -73,11 +73,42 @@ test('a catalog entry fills the fields the panel requires', () => {
   assert.equal(alarm.createdAt, alarm.at, 'the scheduled instant is the only time the record carries')
 })
 
-test('an overdue entry is fired, a cancelled one stays cancelled', () => {
+test('an overdue entry whose instant has passed is fired', () => {
   const overdue = toClockAlarm({ id: 'a', title: 't', prompt: 'p', scheduledAt: '2026-10-17T00:00:00.000Z', state: 'overdue', sessionId: 's' }, T0, 'UTC')
   assert.equal(overdue.status, 'fired')
-  const cancelled = toClockAlarm({ id: 'b', title: 't', prompt: 'p', state: 'cancelled', sessionId: 's' }, T0, 'UTC')
-  assert.equal(cancelled.status, 'cancelled')
+})
+
+test('a delivered record is fired even though its state still says scheduled', () => {
+  // The official signal for "already delivered" is the catalog status, not the
+  // record state: state stays "scheduled" after delivery. Reading state alone
+  // put delivered alarms back in the pending column, which is the bug reported.
+  const delivered = toClockAlarm({
+    id: 'd', title: 't', prompt: 'p', scheduledAt: '2026-10-18T09:00:00.000Z',
+    state: 'scheduled', status: 'inactive', sessionId: 's',
+  }, T0, 'UTC')
+  assert.equal(delivered.status, 'fired')
+  assert.equal(delivered.firedAt, delivered.at, 'a delivered alarm carries the instant it fired')
+})
+
+test('a delivery receipt alone is enough to call it fired', () => {
+  const receipt = toClockAlarm({
+    id: 'e', title: 't', prompt: 'p', scheduledAt: '2026-10-18T09:00:00.000Z',
+    state: 'scheduled', status: 'active', sessionId: 's', lastDelivery: { deliveredAt: '2026-10-18T09:00:01.000Z' },
+  }, T0, 'UTC')
+  assert.equal(receipt.status, 'fired')
+})
+
+test('an active record with no receipt is pending', () => {
+  const pending = toClockAlarm({ id: 'f', title: 't', prompt: 'p', scheduledAt: '2026-10-18T11:00:00.000Z', state: 'scheduled', status: 'active', sessionId: 's' }, T0, 'UTC')
+  assert.equal(pending.status, 'pending')
+  assert.equal(pending.firedAt, undefined)
+})
+
+test('the official service has no cancelled state, so none is invented', () => {
+  // Cancelling deletes the record. A row claiming "cancelled" would describe a
+  // state the harness cannot produce.
+  const row = toClockAlarm({ id: 'g', title: 't', prompt: 'p', state: 'cancelled', sessionId: 's' }, T0, 'UTC')
+  assert.notEqual(row.status, 'cancelled')
 })
 
 test('an overdue entry whose instant is still ahead is not claimed as fired', () => {

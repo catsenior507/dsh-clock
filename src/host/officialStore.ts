@@ -102,6 +102,16 @@ export function toCreateRequest(input: {
 /** A schedule record as `list()` returns it: the record plus its session. */
 export interface CatalogLike extends RecordLike {
   sessionId: string
+  /**
+   * `active` while the record can still deliver, `inactive` once it is done.
+   *
+   * This - not `state` - is what says a one-shot reminder has been delivered:
+   * a delivered record keeps `state: "scheduled"` and only flips this flag.
+   * Reading `state` alone put delivered alarms back in the pending column.
+   */
+  status?: string
+  /** Present once a delivery was durably acknowledged. */
+  lastDelivery?: { scheduledAt?: string; deliveredAt?: string; messageId?: string }
 }
 
 /** The panel's alarm, as the clock plugin already defines it. */
@@ -140,10 +150,12 @@ export function toClockAlarm(entry: CatalogLike, now: number, defaultZone: strin
   const parsed = entry.scheduledAt === undefined ? NaN : Date.parse(entry.scheduledAt)
   const at = Number.isFinite(parsed) ? parsed : 0
   const state = entry.state ?? 'scheduled'
-  const status: ClockAlarmLike['status'] =
-    state === 'overdue' ? (at <= now ? 'fired' : 'pending')
-      : state === 'cancelled' || state === 'inactive' ? 'cancelled'
-        : 'pending'
+  // An inactive record has delivered (or was retired); it never delivers again.
+  // A lastDelivery receipt is the same fact stated twice, so either one decides.
+  const delivered = entry.status === 'inactive' || entry.lastDelivery !== undefined
+  const status: ClockAlarmLike['status'] = delivered
+    ? 'fired'
+    : state === 'overdue' && at <= now ? 'fired' : 'pending'
   return {
     id: entry.id,
     at,
@@ -154,5 +166,6 @@ export function toClockAlarm(entry: CatalogLike, now: number, defaultZone: strin
     origin: 'user',
     createdAt: at,
     status,
+    ...(delivered ? { firedAt: at } : {}),
   }
 }
